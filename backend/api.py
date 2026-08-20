@@ -8,32 +8,41 @@ Implements all required API endpoints for the LearnOS educational platform:
   - /api/pipeline/run: bootstrap the multi-stage video generation task
   - /api/pipeline/status/{sessionId}: SSE status stream
 """
+from __future__ import annotations
+
 import asyncio
 import os
 import shutil
 import subprocess
+import sys
+import socket
 import time
 import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from fastapi import FastAPI, BackgroundTasks, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 import json
 import logging
 from datetime import datetime
 
+ROOT = Path(__file__).resolve().parent
+
+# If a local virtual environment exists, re-exec into it so `python api.py`
+# works even when the shell points at a different interpreter.
+_VENV_PYTHON = ROOT / ".venv" / ("Scripts" if os.name == "nt" else "bin") / (
+    "python.exe" if os.name == "nt" else "python"
+)
+if _VENV_PYTHON.exists() and Path(sys.executable).resolve() != _VENV_PYTHON.resolve():
+    os.execv(
+        str(_VENV_PYTHON),
+        [str(_VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]],
+    )
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("backend_api")
-
-# Define roots and add to python path
-ROOT = Path(__file__).resolve().parent
-import sys
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 # Dynamically prepend user-level Python Scripts and project local bin directory to system PATH.
 # This ensures that Manim, FFmpeg, FFprobe, and Uvicorn executables can be resolved properly.
@@ -50,6 +59,13 @@ if LOCAL_BIN_PATH not in path_list:
 
 os.environ["PATH"] = os.pathsep.join(path_list)
 logger.info(f"Dynamically injected execution paths. Updated PATH: {os.environ['PATH'][:300]}...")
+
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from mongodb import save_learner_profile, get_learner_profile
 
 import modules.config
 from modules.config import PATHS, RenderWorkspace
@@ -76,23 +92,16 @@ from modules.manim.semantic_compiler import semantic_compile_all
 from modules.manim.renderer import render, reset_llm_repair_state
 from modules.video.ffmpeg_merge import merge
 
-app = FastAPI(title="LearnOS Python API Backend")
 
-# Enable CORS for all routes (to support local Vite client port 3000)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ============================================================
+# PYDANTIC MODELS
+# ============================================================
 
-# Active jobs tracking for SSE status streaming
-ACTIVE_JOBS: Dict[str, Dict[str, Any]] = {}
 
 class PersistRequest(BaseModel):
     filename: str
     payload: Dict[str, Any]
+
 
 class LearnerProfilePayload(BaseModel):
     learner_id: str = ""
@@ -106,6 +115,7 @@ class LearnerProfilePayload(BaseModel):
     subject_for_lesson: str = "Physics"
     subject_confidence: int = 50
 
+
 class PipelineRunRequest(BaseModel):
     topic: str
     subject: str
@@ -118,6 +128,79 @@ class PipelineRunRequest(BaseModel):
 
 class IndexCurriculumRequest(BaseModel):
     filename: str
+
+
+app = FastAPI(title="LearnOS Python API Backend")
+
+# Enable CORS for all routes (to support local Vite client port 3000)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# ─────────────────────────────────────────
+
+# Learner Profile APIs
+
+# ─────────────────────────────────────────
+
+@app.post("/api/profile")
+
+async def save_profile(profile: LearnerProfilePayload):
+
+    try:
+
+        profile_dict = profile.model_dump()
+
+        save_learner_profile(profile_dict)
+
+        return {
+
+            "success": True,
+
+            "message": "Learner profile saved"
+
+        }
+
+    except Exception as e:
+
+        logger.error(f"Error saving learner profile: {e}")
+
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/profile/{learner_id}")
+
+async def get_profile(learner_id: str):
+
+    try:
+
+        profile = get_learner_profile(learner_id)
+
+        if not profile:
+
+            raise HTTPException(
+
+                status_code=404,
+
+                detail="Learner profile not found"
+
+            )
+
+        return profile
+
+    except HTTPException:
+
+        raise
+
+    except Exception as e:
+
+        logger.error(f"Error retrieving learner profile: {e}")
+
+        raise HTTPException(status_code=500, detail=str(e))
+# Active jobs tracking for SSE status streaming
+ACTIVE_JOBS: Dict[str, Dict[str, Any]] = {}
 
 # Ensure folders exist
 USER_DATA_DIR = ROOT / "data" / "user"
@@ -953,15 +1036,36 @@ app.mount("/generated", StaticFiles(directory=str(ROOT / "data" / "renders")), n
 _results_mount = CURRICULUM_RESULTS_DIR if CURRICULUM_RESULTS_DIR.is_dir() else RESULTS_DIR
 app.mount("/results", StaticFiles(directory=str(_results_mount)), name="results")
 
+
+def _select_port(preferred: int = 5000, scan_limit: int = 20) -> int:
+    """Return PORT if set, otherwise the first free port from preferred upward."""
+    env_port = os.getenv("PORT")
+    if env_port:
+        try:
+            return int(env_port)
+        except ValueError:
+            logger.warning("Invalid PORT=%r; falling back to auto-select", env_port)
+
+    for port in range(preferred, preferred + scan_limit):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if sock.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+
+    return preferred
+
+
 if __name__ == "__main__":
     import uvicorn
+    port = _select_port()
     logger.info("=" * 80)
     logger.info("LearnOS Python API Server")
+    logger.info("Listening on port %s", port)
     logger.info("=" * 80)
     uvicorn.run(
         "api:app",
         host="0.0.0.0",
-        port=5000,
+        port=port,
         log_level="info",
         reload=False
     )

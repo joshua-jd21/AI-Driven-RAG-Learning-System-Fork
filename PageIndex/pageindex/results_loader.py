@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-from .utils import get_pdf_name
 
 _GARBLED_RE = re.compile(r"/G\d{2,3}")
 
@@ -25,6 +25,27 @@ ARTIFACT_FILES = (
     "concept_graph.json",
     "pedagogical_metadata.json",
 )
+
+
+def _sanitize_filename(filename: str, replacement: str = "-") -> str:
+    return filename.replace("/", replacement)
+
+
+def get_pdf_name(pdf_path: str | BytesIO) -> str:
+    """Return a stable PDF basename without importing the full PageIndex stack."""
+    if isinstance(pdf_path, str):
+        return os.path.basename(pdf_path)
+    if isinstance(pdf_path, BytesIO):
+        try:
+            import PyPDF2
+
+            pdf_reader = PyPDF2.PdfReader(pdf_path)
+            meta = pdf_reader.metadata
+            pdf_name = meta.title if meta and meta.title else "Untitled"
+            return _sanitize_filename(pdf_name)
+        except Exception:
+            return "Untitled"
+    return os.path.basename(str(pdf_path))
 
 
 def results_dir_for_pdf(pdf_path: str, results_root: Optional[Path] = None) -> Path:
