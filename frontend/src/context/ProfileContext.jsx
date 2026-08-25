@@ -1,13 +1,19 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useEffect, useState } from 'react';
 
 const ProfileContext = createContext();
 
 export const useProfile = () => useContext(ProfileContext);
 
+const LEARNER_ID_KEY = 'learnos_learner_id';
+
 const DEFAULT_PROFILE = {
   learner_id: '',
   name: '',
   academic_level: 'class_11',
+  grade: '11',
+  board: 'CBSE',
+  language: 'English',
+  profile_version: 1,
   exam_target: ['JEE'],
   learning_style: 'visual',
   pace_preference: 'balanced',
@@ -15,115 +21,178 @@ const DEFAULT_PROFILE = {
   confidence_map: {
     Chemistry: 50,
     Physics: 50,
-    Mathematics: 50
+    Mathematics: 50,
   },
   created_at: '',
-  updated_at: ''
+  updated_at: '',
 };
+
+const API_HEADERS = {
+  'Content-Type': 'application/json',
+};
+
+const ensureLearnerId = () => {
+  let learnerId = localStorage.getItem(LEARNER_ID_KEY);
+  if (!learnerId) {
+    learnerId = `user-${Math.random().toString(36).slice(2, 11)}`;
+    localStorage.setItem(LEARNER_ID_KEY, learnerId);
+  }
+  return learnerId;
+};
+
+const normalizeProfile = (raw, fallbackId = '') => {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const confidenceMap = source.confidence_map && typeof source.confidence_map === 'object'
+    ? source.confidence_map
+    : { ...DEFAULT_PROFILE.confidence_map };
+
+  return {
+    ...DEFAULT_PROFILE,
+    ...source,
+    learner_id: source.learner_id || fallbackId || '',
+    exam_target: Array.isArray(source.exam_target) ? source.exam_target : [...DEFAULT_PROFILE.exam_target],
+    weak_subjects: Array.isArray(source.weak_subjects) ? source.weak_subjects : [],
+    confidence_map: confidenceMap,
+    grade: source.grade || '',
+    board: source.board || '',
+    language: source.language || 'English',
+    profile_version: Number.isFinite(Number(source.profile_version)) ? Number(source.profile_version) : 1,
+  };
+};
+
+const buildGuestProfile = (learnerId) => ({
+  ...DEFAULT_PROFILE,
+  learner_id: learnerId,
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+});
 
 export const ProfileProvider = ({ children }) => {
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
   const [loading, setLoading] = useState(true);
 
-  // Load profile from API or LocalStorage fallback
   useEffect(() => {
+    let cancelled = false;
+
     async function loadProfile() {
+      const learnerId = ensureLearnerId();
+      const baseFallback = buildGuestProfile(learnerId);
+
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 4000);
-        const response = await fetch('/api/load/profile.json', {
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
+        const response = await fetch(`/api/profile/${encodeURIComponent(learnerId)}`);
         if (response.ok) {
           const data = await response.json();
-          if (data && data.learner_id) {
-            setProfile(data);
+          if (!cancelled) {
+            setProfile(normalizeProfile(data, learnerId));
+          }
+          return;
+        }
+
+        if (response.status === 404) {
+          const createResponse = await fetch('/api/profile', {
+            method: 'POST',
+            headers: API_HEADERS,
+            body: JSON.stringify(baseFallback),
+          });
+          if (createResponse.ok) {
+            const data = await createResponse.json();
+            const savedProfile = normalizeProfile(data.profile || data, learnerId);
+            if (!cancelled) {
+              setProfile(savedProfile);
+            }
             return;
           }
         }
       } catch (err) {
-        console.warn('Failed to load profile from server, checking local storage:', err);
+        console.warn('Failed to load profile from server, using local fallback:', err);
       }
 
-      // Check local storage fallback
-      const local = localStorage.getItem('learnos_profile');
-      if (local) {
-        try {
-          setProfile(JSON.parse(local));
-        } catch (e) {}
-      } else {
-        // Generate new guest profile
-        const newProfile = {
-          ...DEFAULT_PROFILE,
-          learner_id: `user-${Math.random().toString(36).substr(2, 9)}`,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        };
-        setProfile(newProfile);
-        localStorage.setItem('learnos_profile', JSON.stringify(newProfile));
+      if (!cancelled) {
+        setProfile(baseFallback);
       }
     }
-    loadProfile().finally(() => setLoading(false));
+
+    loadProfile().finally(() => {
+      if (!cancelled) {
+        setLoading(false);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // Save profile to API and local storage
   const updateProfile = async (updates) => {
-    const newProfile = {
-      ...profile,
-      ...updates,
-      updated_at: new Date().toISOString()
-    };
-
-    setProfile(newProfile);
-    localStorage.setItem('learnos_profile', JSON.stringify(newProfile));
+    const learnerId = profile.learner_id || ensureLearnerId();
+    const draftProfile = normalizeProfile(
+      {
+        ...profile,
+        ...updates,
+        learner_id: learnerId,
+        updated_at: new Date().toISOString(),
+      },
+      learnerId,
+    );
 
     try {
-      await fetch('/api/persist', {
+      const response = await fetch('/api/profile', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename: 'profile.json',
-          payload: newProfile
-        })
+        headers: API_HEADERS,
+        body: JSON.stringify(draftProfile),
       });
+
+      if (response.ok) {
+        const data = await response.json();
+        const savedProfile = normalizeProfile(data.profile || data, learnerId);
+        setProfile(savedProfile);
+        localStorage.setItem(LEARNER_ID_KEY, savedProfile.learner_id);
+        return savedProfile;
+      }
     } catch (err) {
-      console.error('Failed to sync profile with server:', err);
+      console.warn('Profile save failed; keeping local draft until the next sync:', err);
     }
+
+    setProfile(draftProfile);
+    localStorage.setItem(LEARNER_ID_KEY, learnerId);
+    return draftProfile;
   };
 
   const resetProfile = async () => {
-    const newId = `user-${Math.random().toString(36).substr(2, 9)}`;
-    const freshProfile = {
-      ...DEFAULT_PROFILE,
-      learner_id: newId,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
+    const newId = `user-${Math.random().toString(36).slice(2, 11)}`;
+    localStorage.setItem(LEARNER_ID_KEY, newId);
+    localStorage.removeItem('learnos_profile');
+
+    const freshProfile = buildGuestProfile(newId);
+    try {
+      const response = await fetch('/api/profile', {
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify(freshProfile),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const savedProfile = normalizeProfile(data.profile || data, newId);
+        setProfile(savedProfile);
+        return savedProfile;
+      }
+    } catch (err) {
+      console.warn('Profile reset failed; using local fallback profile:', err);
+    }
 
     setProfile(freshProfile);
-    localStorage.setItem('learnos_profile', JSON.stringify(freshProfile));
 
     try {
       await fetch('/api/persist', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename: 'profile.json',
-          payload: freshProfile
-        })
-      });
-      
-      // Clear other files by writing empty targets
-      await fetch('/api/persist', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: 'history.json', payload: { sessions: [] } })
+        headers: API_HEADERS,
+        body: JSON.stringify({ filename: 'history.json', payload: { sessions: [] } }),
       });
 
       await fetch('/api/persist', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: API_HEADERS,
         body: JSON.stringify({
           filename: 'analytics.json',
           payload: {
@@ -132,13 +201,15 @@ export const ProfileProvider = ({ children }) => {
             topics_covered: [],
             weak_topic_flags: [],
             daily_activity: [],
-            subject_distribution: {}
-          }
-        })
+            subject_distribution: {},
+          },
+        }),
       });
     } catch (err) {
-      console.error('Failed to reset data on server:', err);
+      console.warn('Failed to clear server-side analytics/history during reset:', err);
     }
+
+    return freshProfile;
   };
 
   return (

@@ -40,6 +40,9 @@ Use the curriculum context as the primary source of truth.
 Use terminology, formulas, labels, and concepts from the curriculum context whenever possible.
 Do not invent unsupported facts.
 
+LESSON SUBJECT: {subject}
+LESSON TOPIC: {topic}
+
 {learner_context}
 
 STORYBOARD ENTRY:
@@ -91,6 +94,9 @@ Use the curriculum context as the PRIMARY source of truth.
 Use textbook terminology, element symbols, formulas, and model names from the curriculum context.
 Do not invent unsupported chemical facts.
 
+LESSON SUBJECT: {subject}
+LESSON TOPIC: {topic}
+
 {learner_context}
 
 STORYBOARD ENTRY:
@@ -138,6 +144,9 @@ CURRICULUM CONTEXT:
 {curriculum_context}
 Use the curriculum context as the primary source of truth.
 Use textbook terminology whenever available.
+
+LESSON SUBJECT: {subject}
+LESSON TOPIC: {topic}
 
 {learner_context}
 
@@ -193,6 +202,7 @@ def build_semantic_plan(
     learner_profile: dict[str, Any] | None = None,
     topic: str = "",
     subject: str = "Physics",
+    learner_context: str | None = None,
 ) -> dict[str, Any]:
     """Generate and validate a semantic plan for one storyboard entry."""
     scene_id = storyboard_entry["scene_id"]
@@ -206,7 +216,7 @@ def build_semantic_plan(
     allowed_events = sorted(getattr(template_cls, "ALLOWED_EVENTS", set()))
     asset_ids = sorted(ASSET_REGISTRY.keys())
     anchor_example = storyboard_entry.get("anchor_example", "")
-    learner_context = format_learner_context(
+    learner_context_text = learner_context or format_learner_context(
         learner_profile, topic or storyboard_entry.get("title", ""), subject
     )
     content_schema = getattr(template_cls, "CONTENT_SCHEMA", None)
@@ -234,7 +244,9 @@ def build_semantic_plan(
             content_schema=content_schema,
             scene_id=scene_id,
             anchor_example=anchor_example,
-            learner_context=learner_context,
+            subject=subject,
+            topic=topic or storyboard_entry.get("title", ""),
+            learner_context=learner_context_text,
         )
     elif is_explain and content_schema:
         prompt = SEMANTIC_PLAN_EXPLAIN_PROMPT.format(
@@ -245,7 +257,9 @@ def build_semantic_plan(
             content_schema=content_schema,
             scene_id=scene_id,
             anchor_example=anchor_example,
-            learner_context=learner_context,
+            subject=subject,
+            topic=topic or storyboard_entry.get("title", ""),
+            learner_context=learner_context_text,
         )
     else:
         prompt = SEMANTIC_PLAN_PROMPT.format(
@@ -256,7 +270,9 @@ def build_semantic_plan(
             asset_ids=", ".join(asset_ids),
             scene_id=scene_id,
             anchor_example=anchor_example,
-            learner_context=learner_context,
+            subject=subject,
+            topic=topic or storyboard_entry.get("title", ""),
+            learner_context=learner_context_text,
         )
     messages = [
         {"role": "system", "content": SEMANTIC_PLAN_SYSTEM},
@@ -281,7 +297,7 @@ def build_semantic_plan(
         if field in storyboard_entry and field not in plan:
             plan[field] = storyboard_entry[field]
 
-    plan["_learner_context"] = learner_context
+    plan["_learner_context"] = learner_context_text
 
     # Register all assets in the global registry
     registry = get_registry()
@@ -309,6 +325,7 @@ def build_all_semantic_plans(
     learner_profile: dict[str, Any] | None = None,
     topic: str = "",
     subject: str = "Physics",
+    learner_context: str | None = None,
 ) -> list[dict[str, Any]]:
     return [
         build_semantic_plan(
@@ -318,6 +335,7 @@ def build_all_semantic_plans(
             learner_profile=learner_profile,
             topic=topic,
             subject=subject,
+            learner_context=learner_context,
         )
         for entry in storyboard
     ]

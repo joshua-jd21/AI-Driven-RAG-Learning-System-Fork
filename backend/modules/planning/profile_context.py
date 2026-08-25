@@ -75,28 +75,38 @@ def normalize_profile(raw: dict[str, Any] | None, subject: str = "Physics") -> d
 
     academic_level = (
         raw.get("academic_level")
+        or _grade_to_level(raw.get("grade"))
         or _legacy_level(raw.get("curriculum_board", ""))
         or "class_11"
     )
     learning_style = raw.get("learning_style") or "visual"
-    pace_preference = raw.get("pace_preference") or "balanced"
+    pace_preference = raw.get("pace_preference") or raw.get("pace") or "balanced"
     confidence_map = raw.get("confidence_map") or {}
     subject_for_lesson = raw.get("subject_for_lesson") or subject or "Physics"
     subject_confidence = raw.get("subject_confidence")
     if subject_confidence is None:
         subject_confidence = confidence_map.get(subject_for_lesson, 50)
 
+    try:
+        profile_version = int(raw.get("profile_version") or 1)
+    except (TypeError, ValueError):
+        profile_version = 1
+
     return {
         "learner_id": raw.get("learner_id", "guest"),
         "name": raw.get("name") or raw.get("fullname") or "Learner",
         "academic_level": academic_level,
+        "grade": raw.get("grade") or _level_to_grade(academic_level),
+        "board": raw.get("board") or raw.get("curriculum_board") or "",
         "exam_target": raw.get("exam_target") or [],
         "learning_style": learning_style,
         "pace_preference": pace_preference,
+        "language": raw.get("language") or "English",
         "weak_subjects": raw.get("weak_subjects") or [],
         "confidence_map": confidence_map,
         "subject_for_lesson": subject_for_lesson,
         "subject_confidence": int(subject_confidence) if isinstance(subject_confidence, (int, float)) else 50,
+        "profile_version": profile_version,
     }
 
 
@@ -113,6 +123,32 @@ def _legacy_level(curriculum_board: str) -> str:
     if "ug" in s or "college" in s or "undergrad" in s:
         return "undergraduate"
     return ""
+
+
+def _grade_to_level(grade: Any) -> str:
+    grade_str = str(grade or "").strip().lower()
+    if grade_str in {"9", "class_9", "grade_9", "ix"}:
+        return "class_9"
+    if grade_str in {"10", "class_10", "grade_10", "x"}:
+        return "class_10"
+    if grade_str in {"11", "class_11", "grade_11", "xi"}:
+        return "class_11"
+    if grade_str in {"12", "class_12", "grade_12", "xii"}:
+        return "class_12"
+    if grade_str in {"ug", "college", "undergraduate"}:
+        return "undergraduate"
+    return ""
+
+
+def _level_to_grade(academic_level: str) -> str:
+    return {
+        "class_9": "9",
+        "class_10": "10",
+        "class_11": "11",
+        "class_12": "12",
+        "undergraduate": "undergraduate",
+        "competitive": "competitive",
+    }.get(academic_level, "")
 
 
 def level_group(profile: dict[str, Any]) -> str:
@@ -172,10 +208,10 @@ def format_learner_context(
     if cm:
         try:
             weakest_subj = min(cm.keys(), key=lambda k: cm.get(k, 50))
-            if cm.get(weakest_subj, 50) < 50 and weakest_subj != p["subject_for_lesson"]:
+            if cm.get(weakest_subj, 50) < 50:
                 weakest_line = (
-                    f"\n- Cross-subject weakness: {weakest_subj} ({cm[weakest_subj]}%) — "
-                    "if the topic touches this area, bridge gently."
+                    f"\n- Weakest subject: {weakest_subj} ({cm[weakest_subj]}%) — "
+                    "bridge prerequisites gently when related ideas appear."
                 )
         except Exception:
             pass
@@ -183,7 +219,6 @@ def format_learner_context(
     return (
         "LEARNER CONTEXT (personalize ALL output to this student):\n"
         f"- Name: {p['name']} | Level: {level_label}{exam_line}\n"
-        f"- Subject of lesson: {p['subject_for_lesson']} | Topic: {topic}\n"
         f"- {band_rule}\n"
         f"- Learning style: {style} — {style_rule}\n"
         f"- Pace: {pace} — narration target {word_lo}-{word_hi} words per scene.\n"

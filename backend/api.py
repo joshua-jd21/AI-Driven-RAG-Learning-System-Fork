@@ -64,7 +64,7 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from mongodb import save_learner_profile, get_learner_profile
 
 import modules.config
@@ -73,8 +73,8 @@ from modules.llm.nvidia_client import NvidiaClient
 from modules.planning.storyboard import build_storyboard
 from modules.planning.semantic_plan import build_all_semantic_plans
 from modules.planning.narration_writer import write_all_narrations
+from modules.planning.learner_context_service import get_learner_context
 from modules.planning.asset_registry import reset_registry
-from modules.planning.profile_context import format_learner_context
 from modules.planning.grounding_validator import validate_storyboard_grounding, log_grounding_issues
 
 from modules.retrieval.pageindex_retriever import (
@@ -107,11 +107,15 @@ class LearnerProfilePayload(BaseModel):
     learner_id: str = ""
     name: str = "Learner"
     academic_level: str = "class_11"
-    exam_target: List[str] = []
+    grade: str = ""
+    board: str = ""
+    language: str = "English"
+    profile_version: int = 0
+    exam_target: List[str] = Field(default_factory=list)
     learning_style: str = "visual"
     pace_preference: str = "balanced"
-    weak_subjects: List[str] = []
-    confidence_map: Dict[str, int] = {}
+    weak_subjects: List[str] = Field(default_factory=list)
+    confidence_map: Dict[str, int] = Field(default_factory=dict)
     subject_for_lesson: str = "Physics"
     subject_confidence: int = 50
 
@@ -146,21 +150,45 @@ app.add_middleware(
 
 # ─────────────────────────────────────────
 
+
+def _default_profile(learner_id: str = "default-learner") -> Dict[str, Any]:
+    return {
+        "learner_id": learner_id,
+        "name": "Explorer",
+        "academic_level": "class_11",
+        "grade": "11",
+        "board": "CBSE",
+        "language": "English",
+        "profile_version": 1,
+        "exam_target": ["JEE"],
+        "learning_style": "visual",
+        "pace_preference": "balanced",
+        "weak_subjects": [],
+        "confidence_map": {
+            "Chemistry": 50,
+            "Physics": 50,
+            "Mathematics": 50,
+        },
+        "created_at": "",
+        "updated_at": "",
+    }
+
 @app.post("/api/profile")
 
 async def save_profile(profile: LearnerProfilePayload):
 
     try:
-
         profile_dict = profile.model_dump()
-
-        save_learner_profile(profile_dict)
+        if not profile_dict.get("learner_id"):
+            profile_dict["learner_id"] = "default-learner"
+        saved_profile = save_learner_profile(profile_dict)
 
         return {
 
             "success": True,
 
-            "message": "Learner profile saved"
+            "message": "Learner profile saved",
+            "profile": saved_profile,
 
         }
 
@@ -348,6 +376,24 @@ def _sync_analytics_from_history() -> Dict[str, Any]:
 async def persist_data(req: PersistRequest):
     try:
         filename = os.path.basename(req.filename)
+
+        if filename == "profile.json":
+            profile_payload = dict(req.payload)
+            if not profile_payload.get("learner_id"):
+                profile_payload["learner_id"] = "default-learner"
+            saved_profile = save_learner_profile(profile_payload)
+
+            file_path = USER_DATA_DIR / filename
+            temp_path = file_path.with_suffix(".tmp")
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(saved_profile, f, ensure_ascii=False, indent=2)
+            if file_path.exists():
+                file_path.unlink()
+            temp_path.rename(file_path)
+
+            logger.info("Successfully persisted profile.json to MongoDB and mirrored JSON snapshot")
+            return {"success": True, "profile": saved_profile}
+
         file_path = USER_DATA_DIR / filename
         
         # Safe atomic write
@@ -366,9 +412,26 @@ async def persist_data(req: PersistRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/load/{filename}")
-async def load_data(filename: str):
+async def load_data(filename: str, learner_id: Optional[str] = None):
     try:
         filename = os.path.basename(filename)
+        if filename == "profile.json":
+            if learner_id:
+                profile = get_learner_profile(learner_id)
+                if profile:
+                    return profile
+
+            file_path = USER_DATA_DIR / filename
+            if file_path.exists():
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if data.get("learner_id"):
+                        return data
+                except Exception:
+                    pass
+            return _default_profile(learner_id or "default-learner")
+
         file_path = USER_DATA_DIR / filename
         if not file_path.exists():
             # Graceful default fallbacks matching client expectations
@@ -379,23 +442,6 @@ async def load_data(filename: str):
                 if history_data.get("sessions"):
                     return _sync_analytics_from_history()
                 return dict(DEFAULT_ANALYTICS)
-            elif filename == "profile.json":
-                return {
-                    "learner_id": "default-learner",
-                    "name": "Explorer",
-                    "academic_level": "class_11",
-                    "exam_target": ["JEE"],
-                    "learning_style": "visual",
-                    "pace_preference": "balanced",
-                    "weak_subjects": [],
-                    "confidence_map": {
-                        "Chemistry": 50,
-                        "Physics": 50,
-                        "Mathematics": 50
-                    },
-                    "created_at": "",
-                    "updated_at": ""
-                }
             return {}
         
         with open(file_path, "r", encoding="utf-8") as f:
@@ -426,6 +472,7 @@ async def run_pipeline_task(
     gemini_api_key: str | None = None,
     nvidia_api_key: str | None = None,
     learner_profile: Optional[Dict[str, Any]] = None,
+    learner_id: str | None = None,
     subject: str = "Physics",
     document_id: str | None = None,
     resolution=None,
@@ -436,6 +483,9 @@ async def run_pipeline_task(
 
     queue = job["queue"]
 
+    if learner_profile is None and learner_id:
+        learner_profile = get_learner_profile(learner_id)
+
     if learner_profile is None:
         profile_path = USER_DATA_DIR / "profile.json"
         if profile_path.exists():
@@ -444,6 +494,16 @@ async def run_pipeline_task(
             except Exception as e:
                 logger.warning(f"Failed to read learner profile from disk: {e}")
                 learner_profile = None
+
+    if learner_profile and not learner_id:
+        learner_id = learner_profile.get("learner_id")
+
+    learner_context_block = get_learner_context(
+        learner_id or (learner_profile or {}).get("learner_id") or "default-learner",
+        topic,
+        subject,
+        fallback_profile=learner_profile,
+    )
 
     if learner_profile:
         logger.info(
@@ -576,15 +636,15 @@ async def run_pipeline_task(
         # --- Stage 1: Generate explanation package ---
         await queue.put({"stage": "explaining", "progress": 15, "message": "Formulating pedagogical syllabus objectives..."})
 
-        learner_context_block = format_learner_context(learner_profile, topic, subject)
-
         explanation_package = None
         try:
             client = NvidiaClient()
             prompt = (
                 f"CURRICULUM CONTEXT:\n{curriculum_context}\n\n"
                 f"{learner_context_block}\n\n"
-                f"Topic: {topic}. Generate a structured educational blueprint with "
+                f"LESSON SUBJECT: {subject}\n"
+                f"LESSON TOPIC: {topic}\n\n"
+                f"Generate a structured educational blueprint with "
                 "learning objectives, prerequisites, and 2-3 DIFFERENT real-world analogies "
                 "calibrated to the learner above. Each analogy must be distinct."
             )
@@ -633,7 +693,8 @@ async def run_pipeline_task(
             curriculum_context=curriculum_context,
             curriculum_sections=curriculum_sections,
             learner_profile=learner_profile,
-            subject=subject
+            subject=subject,
+            learner_context=learner_context_block,
         )
         
         # Grounding validation — warns if storyboard scenes don't overlap with curriculum
@@ -668,6 +729,7 @@ async def run_pipeline_task(
             learner_profile=learner_profile,
             topic=topic,
             subject=subject,
+            learner_context=learner_context_block,
         )
 
         # --- Stage 3: Narration ---
@@ -679,6 +741,7 @@ async def run_pipeline_task(
             learner_profile=learner_profile,
             topic=topic,
             subject=subject,
+            learner_context=learner_context_block,
         )
         
         # Concatenate script text for the script inspector
@@ -858,6 +921,11 @@ async def start_pipeline(req: PipelineRunRequest, background_tasks: BackgroundTa
     )
 
     learner_profile_dict = req.learnerProfile.model_dump() if req.learnerProfile else None
+    learner_id = None
+    if learner_profile_dict:
+        saved_profile = save_learner_profile(learner_profile_dict)
+        learner_profile_dict = saved_profile
+        learner_id = saved_profile.get("learner_id")
 
     ACTIVE_JOBS[session_id] = {
         "topic": req.topic,
@@ -867,6 +935,7 @@ async def start_pipeline(req: PipelineRunRequest, background_tasks: BackgroundTa
         "gemini_api_key": req.geminiApiKey,
         "nvidia_api_key": req.nvidiaApiKey,
         "learner_profile": learner_profile_dict,
+        "learner_id": learner_id,
         "resolution": resolution_preview,
         "queue": asyncio.Queue(),
         "status": "queued"
@@ -880,6 +949,7 @@ async def start_pipeline(req: PipelineRunRequest, background_tasks: BackgroundTa
         req.geminiApiKey,
         req.nvidiaApiKey,
         learner_profile_dict,
+        learner_id,
         req.subject,
         req.documentId,
         resolution_preview,

@@ -58,6 +58,10 @@ IMPORTANT:
   When a scene builds on a prerequisite, reference that prior concept briefly in the scene title or learning_goal.
 
 - If the curriculum context is empty, fall back to general educational knowledge.
+
+LESSON SUBJECT: {subject}
+LESSON TOPIC: {topic}
+
 {learner_context}
 
 TEMPLATE FAMILIES — pick the best family per scene:
@@ -191,6 +195,7 @@ def build_storyboard(
     curriculum_sections: list | None = None,
     learner_profile: dict[str, Any] | None = None,
     subject: str = "Physics",
+    learner_context: str | None = None,
 ) -> list[dict[str, Any]]:
     """Generate a 5-scene storyboard arc for the given topic."""
     logger.info("Building storyboard for topic: %s", topic)
@@ -209,12 +214,13 @@ def build_storyboard(
     template_ids = ", ".join(
         mechanics_middle + EXPLAIN_TEMPLATE_IDS + CHEMISTRY_TEMPLATE_IDS + ["freeform"]
     )
-    learner_context = format_learner_context(learner_profile, topic, subject)
+    learner_context_text = learner_context or format_learner_context(learner_profile, topic, subject)
     prompt = STORYBOARD_PROMPT.format(
         topic=topic,
         curriculum_context=enriched_context,
         prerequisite_block=prerequisite_block,
-        learner_context=learner_context,
+        subject=subject,
+        learner_context=learner_context_text,
         mechanics_list=mechanics_list,
         explain_list=explain_list,
         template_ids=template_ids,

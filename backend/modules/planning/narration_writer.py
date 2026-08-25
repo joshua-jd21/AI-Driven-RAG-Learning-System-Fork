@@ -38,6 +38,9 @@ Use the curriculum context as the primary source of truth.
 Use textbook terminology whenever available.
 Do not contradict the curriculum context.
 
+LESSON SUBJECT: {subject}
+LESSON TOPIC: {topic}
+
 {learner_context}
 
 SCENE TITLE: {title}
@@ -80,6 +83,7 @@ def write_narration(
     learner_profile: dict[str, Any] | None = None,
     topic: str = "",
     subject: str = "Physics",
+    learner_context: str | None = None,
 ) -> str:
     """Generate narration for one scene and validate anchor phrases."""
     scene_id = plan["scene_id"]
@@ -97,7 +101,7 @@ def write_narration(
 
     p_norm = normalize_profile(learner_profile, subject)
     word_lo, word_hi = pace_word_budget(p_norm)
-    learner_context = plan.get("_learner_context") or format_learner_context(
+    learner_context_text = plan.get("_learner_context") or learner_context or format_learner_context(
         learner_profile, topic or title, subject
     )
 
@@ -105,7 +109,7 @@ def write_narration(
         logger.warning("Scene %d has no anchor phrases; generating free narration", scene_id)
         return _generate_free(
             title, anchor_example, learning_goal, scene_id,
-            learner_context=learner_context, word_lo=word_lo, word_hi=word_hi,
+            learner_context=learner_context_text, word_lo=word_lo, word_hi=word_hi,
         )
 
     client = NvidiaClient()
@@ -121,7 +125,9 @@ def write_narration(
 
     prompt = NARRATION_PROMPT.format(
         curriculum_context=enriched_context,
-        learner_context=learner_context,
+        subject=subject,
+        topic=topic or title,
+        learner_context=learner_context_text,
         title=title,
         anchor_example=anchor_example,
         learning_goal=learning_goal,
@@ -176,6 +182,7 @@ def write_all_narrations(
     learner_profile: dict[str, Any] | None = None,
     topic: str = "",
     subject: str = "Physics",
+    learner_context: str | None = None,
 ) -> list[dict[str, Any]]:
     """Write narrations for all plans and attach them in-place."""
     for plan in plans:
@@ -186,6 +193,7 @@ def write_all_narrations(
             learner_profile=learner_profile,
             topic=topic,
             subject=subject,
+            learner_context=learner_context,
         )
         plan["narration"] = narration
         logger.info(
