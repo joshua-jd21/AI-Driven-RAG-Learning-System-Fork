@@ -33,91 +33,37 @@ from modules.retrieval.pageindex_retriever import (
 
 logger = get_logger(__name__)
 
-STORYBOARD_SYSTEM = """You are an expert educational video director.
-You design 5-scene progressive lesson arcs that teach a topic through DISTINCT, varied examples.
-NEVER include run_time, duration, seconds, or timing fields.
-Respond ONLY with a valid JSON array. No markdown fences, no commentary."""
+STORYBOARD_SYSTEM = """You are an educational video director.
+Return one valid JSON array of 5 scenes.
+No timing fields, markdown fences, or commentary."""
 
-STORYBOARD_PROMPT = """Design a 5-scene educational video arc for this topic: {topic}
+STORYBOARD_PROMPT = """Design a 5-scene educational arc for topic: {topic}
 
 CURRICULUM CONTEXT:
 {curriculum_context}
 
 {prerequisite_block}
 
-IMPORTANT:
-
-- Use the curriculum context as the PRIMARY source of truth.
-
-- Base scene titles, examples, explanations, formulas, and learning goals on the curriculum context whenever possible.
-
-- Do not invent concepts that are not supported by the curriculum context.
-
-- If prerequisite topics are listed above, order scenes so prerequisites are taught BEFORE dependent concepts
-  (e.g. explain Rutherford scattering before Bohr's model; discharge tube experiments before atomic models).
-  When a scene builds on a prerequisite, reference that prior concept briefly in the scene title or learning_goal.
-
-- If the curriculum context is empty, fall back to general educational knowledge.
+Rules:
+- Prefer curriculum evidence when present.
+- If prerequisites exist, teach them before dependent ideas.
+- If curriculum is absent, use only broadly established, non-advanced knowledge.
+- Adapt the arc to the learner context.
 
 LESSON SUBJECT: {subject}
 LESSON TOPIC: {topic}
 
 {learner_context}
 
-TEMPLATE FAMILIES — pick the best family per scene:
+concept_template must always be one actual registered template ID. Family names below are guidance only and must never be output as values. Prefer the most specific registered ID for the scene; use freeform only when no registered ID fits.
 
-A) PHYSICS SIMULATION (animated motion on chalkboard) — use when the scene shows a physical
-   process, forces, or motion that is best taught with moving objects:
-   {mechanics_list}
+Registered template IDs:
+- Mechanics: {mechanics_ids}
+- Explain: {explain_ids}
+- Chemistry: {chemistry_ids}
+- freeform
 
-B) CHALKBOARD EXPLANATION (conceptual layouts, no physics assets) — use when the scene is
-   about ideas, definitions, formulas, comparisons, or structure:
-   - concept_card: break a concept into 2-4 labeled parts/cards
-   - comparison: contrast two ideas side-by-side (e.g. scalar vs vector, static vs kinetic)
-   - equation: present or derive a key formula with a short explanation
-   - timeline: ordered steps, history, or procedure (3-5 labels on a timeline)
-   - diagram: relationships between parts (nodes in a flow or system)
-
-C) CHEMISTRY (animated atomic / molecular / reaction visuals) — use ONLY when the topic is
-   chemistry. These templates render proper nucleus Dot clusters, concentric orbit Circles,
-   electron transfer animations, and periodic table grids — never cubes or generic rectangles
-   for subatomic particles:
-   - atomic_structure: Bohr / Rutherford / Thomson atomic models, electron shells, element badge
-   - periodic_trends: periodic table grid with trend arrows (atomic radius, electronegativity, etc.)
-   - ionic_bonding: electron dot transfer from donor to acceptor atom with charge labels
-   - covalent_bonding: shared electron pair between atoms with bond order labels
-   - molecular_geometry: VSEPR molecule shape with bond angles
-   - chemical_equilibrium: forward/reverse reaction arrows with Le Chatelier stress animation
-   - acid_base: proton transfer with pH scale and indicator color change
-   - reaction_energy: energy profile diagram (activation energy, exo/endo annotations)
-
-D) FALLBACK: freeform — only if no other family fits.
-
-Also available: intro (scene 1 only), summary (scene 5 only).
-
-SELECTION GUIDANCE:
-- For chemistry topics, ALWAYS prefer family C templates over generic explanation (B) or freeform (D).
-- Mix families across scenes 2-4: e.g. for atomic structure → atomic_structure (visual) + equation (formal) + timeline (history).
-- Prefer simulation (A) when motion/forces are central; prefer explanation (B) for formulas and contrasts.
-- If NO template fits, use "freeform".
-
-PEDAGOGICAL SCENE ROLES — every scene must have a scene_role from this ordered arc:
-  Scene 1: "hook"           — introduce the topic with a surprising fact or relatable analogy
-  Scene 2: "visual_intuition" — show the key visual / phenomenon intuitively
-  Scene 3: "formal_concept"  — present the formal definition, equation, or model
-  Scene 4: "worked_example"  — apply the concept to a concrete example or calculation
-  Scene 5: "summary"         — consolidate learning with 3 key takeaways
-
-REQUIREMENTS:
-- Scene 1: always use "intro" template, scene_role "hook"
-- Scene 5: always use "summary" template, scene_role "summary"
-- Scenes 2-4: choose from families A/B/C/D; use scene_roles visual_intuition/formal_concept/worked_example in that order.
-- Scenes 2, 3, and 4 MUST have THREE DIFFERENT concept_templates AND THREE DIFFERENT anchor_examples.
-- Each scene's learning_goal must be a unique sentence.
-- anchor_example: a concrete real-world object, scenario, or numerical setup, different per scene.
-- subtitle (scene 1 only): short tagline for the intro
-- key_term (scene 1 only): the central term to highlight
-- summary_points (scene 5 only): list of 3 key takeaways
+Arc: hook → visual_intuition → formal_concept → worked_example → summary.
 
 Return a JSON array of exactly 5 objects:
 [
@@ -133,27 +79,27 @@ Return a JSON array of exactly 5 objects:
   }},
   {{
     "scene_id": 2,
-    "concept_template": "<one of: {template_ids}>",
+    "concept_template": "<registered_id>",
     "scene_role": "visual_intuition",
     "title": "...",
-    "anchor_example": "<DISTINCT scenario A>",
-    "learning_goal": "<unique goal A>"
+    "anchor_example": "<example>",
+    "learning_goal": "<goal>"
   }},
   {{
     "scene_id": 3,
-    "concept_template": "<DIFFERENT template>",
+    "concept_template": "<registered_id>",
     "scene_role": "formal_concept",
     "title": "...",
-    "anchor_example": "<DISTINCT scenario B>",
-    "learning_goal": "<unique goal B>"
+    "anchor_example": "<example>",
+    "learning_goal": "<goal>"
   }},
   {{
     "scene_id": 4,
-    "concept_template": "<DIFFERENT template>",
+    "concept_template": "<registered_id>",
     "scene_role": "worked_example",
     "title": "...",
-    "anchor_example": "<DISTINCT scenario C>",
-    "learning_goal": "<unique goal C>"
+    "anchor_example": "<example>",
+    "learning_goal": "<goal>"
   }},
   {{
     "scene_id": 5,
@@ -165,8 +111,7 @@ Return a JSON array of exactly 5 objects:
     "summary_points": ["...", "...", "..."]
   }}
 ]
-
-Return ONLY the JSON array."""
+"""
 
 
 def _build_curriculum_anchor(curriculum_context: str, curriculum_sections: list | None) -> str:
@@ -209,11 +154,9 @@ def build_storyboard(
     mechanics_middle = [
         t for t in MECHANICS_TEMPLATE_IDS if t not in ("intro", "summary")
     ]
-    mechanics_list = "\n".join(f"   - {t}" for t in mechanics_middle)
-    explain_list = "\n".join(f"   - {t}" for t in EXPLAIN_TEMPLATE_IDS)
-    template_ids = ", ".join(
-        mechanics_middle + EXPLAIN_TEMPLATE_IDS + CHEMISTRY_TEMPLATE_IDS + ["freeform"]
-    )
+    mechanics_ids = ", ".join(mechanics_middle)
+    explain_ids = ", ".join(EXPLAIN_TEMPLATE_IDS)
+    chemistry_ids = ", ".join(CHEMISTRY_TEMPLATE_IDS)
     learner_context_text = learner_context or format_learner_context(learner_profile, topic, subject)
     prompt = STORYBOARD_PROMPT.format(
         topic=topic,
@@ -221,9 +164,9 @@ def build_storyboard(
         prerequisite_block=prerequisite_block,
         subject=subject,
         learner_context=learner_context_text,
-        mechanics_list=mechanics_list,
-        explain_list=explain_list,
-        template_ids=template_ids,
+        mechanics_ids=mechanics_ids,
+        explain_ids=explain_ids,
+        chemistry_ids=chemistry_ids,
     )
     messages = [
         {"role": "system", "content": STORYBOARD_SYSTEM},
