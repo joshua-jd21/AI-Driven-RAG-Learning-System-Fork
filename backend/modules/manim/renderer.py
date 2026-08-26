@@ -8,8 +8,6 @@ import subprocess
 import time
 from pathlib import Path
 
-import os
-
 from modules.config import (
     MANIM_MAX_RETRIES,
     MANIM_QUALITY,
@@ -21,7 +19,6 @@ from modules.config import (
     get_logger,
 )
 
-_VENV_MANIM = PATHS["root"].parent.parent / "venv" / "bin" / "manim"
 from modules.llm.nvidia_client import NvidiaClient
 from modules.manim.code_sanitize import is_latex_render_error, strip_latex_mobjects
 
@@ -211,7 +208,7 @@ def _find_scene_mp4(
 def _run_manim(scene_py: Path, scene_class: str, media_dir: Path) -> Path | None:
     """Execute manim CLI and locate output MP4."""
     global _last_error
-    manim_bin = str(_VENV_MANIM) if _VENV_MANIM.exists() else "manim"
+    manim_bin = shutil.which("manim") or "manim"
     cmd = [
         manim_bin,
         "render",

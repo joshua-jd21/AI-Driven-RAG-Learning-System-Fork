@@ -44,21 +44,43 @@ if str(ROOT) not in sys.path:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("backend_api")
 
-# Dynamically prepend user-level Python Scripts and project local bin directory to system PATH.
-# This ensures that Manim, FFmpeg, FFprobe, and Uvicorn executables can be resolved properly.
-USER_SCRIPTS_PATH = r"C:\Users\malla\AppData\Roaming\Python\Python313\Scripts"
-LOCAL_BIN_PATH = str(ROOT / "bin")
+def _prepend_existing_path(candidate: Path, path_list: list[str]) -> None:
+    """Prepend a path candidate when it exists and is not already present."""
+    candidate_str = str(candidate)
+    if candidate.exists() and candidate_str not in path_list:
+        path_list.insert(0, candidate_str)
 
+
+# Dynamically prepend portable execution paths so Manim, FFmpeg, Piper, and
+# Uvicorn can be resolved both locally and in Docker without hard-coded paths.
 current_path = os.environ.get("PATH", "")
-path_list = current_path.split(os.pathsep)
+path_list = [entry for entry in current_path.split(os.pathsep) if entry]
 
-if USER_SCRIPTS_PATH not in path_list:
-    path_list.insert(0, USER_SCRIPTS_PATH)
-if LOCAL_BIN_PATH not in path_list:
-    path_list.insert(0, LOCAL_BIN_PATH)
+_prepend_existing_path(ROOT / "bin", path_list)
+_prepend_existing_path(ROOT / ".venv" / ("Scripts" if os.name == "nt" else "bin"), path_list)
+if os.name == "nt":
+    _prepend_existing_path(
+        Path.home()
+        / "AppData"
+        / "Roaming"
+        / "Python"
+        / f"Python{sys.version_info.major}{sys.version_info.minor}"
+        / "Scripts",
+        path_list,
+    )
+else:
+    _prepend_existing_path(Path.home() / ".local" / "bin", path_list)
+    _prepend_existing_path(
+        Path.home()
+        / "Library"
+        / "Python"
+        / f"{sys.version_info.major}.{sys.version_info.minor}"
+        / "bin",
+        path_list,
+    )
 
 os.environ["PATH"] = os.pathsep.join(path_list)
-logger.info(f"Dynamically injected execution paths. Updated PATH: {os.environ['PATH'][:300]}...")
+logger.info("PATH bootstrap complete: %s", os.environ["PATH"][:300])
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
