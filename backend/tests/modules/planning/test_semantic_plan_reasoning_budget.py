@@ -353,8 +353,15 @@ def test_semantic_plan_schema_uses_canonical_roles_and_flexible_asset_ids() -> N
         "work_energy", ["place", "hold"], {"object": ["block", "car"]}
     )
     assert work_energy["type"] == "object"
-    assert work_energy["properties"]["assets"]["items"]["properties"]["role"]["enum"] == ["object"]
-    assert "car" in work_energy["properties"]["assets"]["items"]["properties"]["asset_id"]["enum"]
+    work_energy_variants = work_energy["properties"]["assets"]["items"]["oneOf"]
+    assert {
+        variant["properties"]["role"]["enum"][0]
+        for variant in work_energy_variants
+    } == {"object"}
+    assert any(
+        variant["properties"]["asset_id"]["enum"] == ["car"]
+        for variant in work_energy_variants
+    )
 
     inertia = semantic_plan._semantic_plan_response_schema(
         "inertia",
@@ -365,9 +372,11 @@ def test_semantic_plan_schema_uses_canonical_roles_and_flexible_asset_ids() -> N
             "external_force": ["arrow_force"],
         },
     )
-    assert inertia["properties"]["assets"]["items"]["properties"]["role"]["enum"] == [
-        "external_force", "stationary_object", "surface"
-    ]
+    variants = inertia["properties"]["assets"]["items"]["oneOf"]
+    assert {
+        variant["properties"]["role"]["enum"][0]
+        for variant in variants
+    } == {"external_force", "stationary_object", "surface"}
 
     intro = semantic_plan._semantic_plan_response_schema("intro", [], {})
     assert intro["properties"]["assets"]["maxItems"] == 0
@@ -383,7 +392,11 @@ def test_mechanics_schema_constrains_asset_parameters() -> None:
             "external_force": ["arrow_force"],
         },
     )
-    params = schema["properties"]["assets"]["items"]["properties"]["params"]
+    arrow_variant = next(
+        variant for variant in schema["properties"]["assets"]["items"]["oneOf"]
+        if variant["properties"]["asset_id"]["enum"] == ["arrow_force"]
+    )
+    params = arrow_variant["properties"]["params"]
     assert params["properties"]["length"]["type"] == "number"
     assert "brown" not in params["properties"]["color"]["enum"]
     assert "magnitude" not in params["properties"]
@@ -395,12 +408,33 @@ def test_asset_parameter_schema_is_scoped_to_selected_asset_ids() -> None:
         ["place", "hold"],
         {"external_force": ["arrow_force"]},
     )
-    asset = schema["properties"]["assets"]["items"]
+    asset = schema["properties"]["assets"]["items"]["oneOf"][0]
     params = asset["properties"]["params"]["properties"]
 
     assert asset["properties"]["asset_id"]["enum"] == ["arrow_force"]
     assert set(params) == {"label", "direction", "color", "length"}
     assert "magnitude" not in params
+
+
+def test_planner_schema_keeps_disjoint_asset_parameters_isolated() -> None:
+    schema = semantic_plan._semantic_plan_response_schema(
+        "mixed",
+        ["place"],
+        {
+            "force": ["arrow_force"],
+            "velocity": ["velocity_indicator"],
+        },
+    )
+    variants = schema["properties"]["assets"]["items"]["oneOf"]
+    by_asset = {
+        variant["properties"]["asset_id"]["enum"][0]: variant["properties"]["params"]["properties"]
+        for variant in variants
+    }
+
+    assert set(by_asset["arrow_force"]) == {"label", "direction", "color", "length"}
+    assert set(by_asset["velocity_indicator"]) == {"color", "magnitude"}
+    assert "magnitude" not in by_asset["arrow_force"]
+    assert "length" not in by_asset["velocity_indicator"]
 
 
 def test_planner_schema_reads_authoritative_asset_schema(monkeypatch) -> None:
@@ -416,7 +450,11 @@ def test_planner_schema_reads_authoritative_asset_schema(monkeypatch) -> None:
         {"external_force": ["arrow_force"]},
     )
 
-    assert schema["properties"]["assets"]["items"]["properties"]["params"]["properties"]["calibration"] == {
+    arrow_variant = next(
+        variant for variant in schema["properties"]["assets"]["items"]["oneOf"]
+        if variant["properties"]["asset_id"]["enum"] == ["arrow_force"]
+    )
+    assert arrow_variant["properties"]["params"]["properties"]["calibration"] == {
         "type": "number",
         "minimum": 0.0,
     }
@@ -510,4 +548,7 @@ def test_invalid_semantic_plan_retries_with_configured_budget(monkeypatch, tmp_p
     assert all(call["max_tokens"] == 8192 for call in calls)
     schema = calls[0]["extra_body"]["response_format"]["json_schema"]["schema"]
     assert schema["type"] == "object"
-    assert schema["properties"]["assets"]["items"]["properties"]["role"]["enum"] == ["object"]
+    assert {
+        variant["properties"]["role"]["enum"][0]
+        for variant in schema["properties"]["assets"]["items"]["oneOf"]
+    } == {"object"}

@@ -94,6 +94,8 @@ ASSET ROLE CONTRACT:
 - `role` MUST be exactly one of the legal asset roles listed above.
 - `role` is a renderer/template-supported semantic slot, not the object's name.
 - `asset_id` is the actual visual object identity and must not be used as `role`.
+- `params` is scoped to the matching `asset_id`; use only the parameter names
+  listed on that asset's contract row. Never borrow a field from another asset.
 - Never invent roles such as `block`, `arrow_force`, or `velocity_indicator`.
 - If the list says there are no legal roles, `assets` MUST be [] and describe
   template-native visuals through `content`, `visible_objects`, and events.
@@ -175,6 +177,8 @@ ASSET ROLE CONTRACT:
 - `role` MUST be exactly one of the legal asset roles listed above.
 - `role` is a renderer/template-supported semantic slot, not the object's name.
 - `asset_id` is the actual visual object identity and must not be used as `role`.
+- `params` is scoped to the matching `asset_id`; use only the parameter names
+  listed on that asset's contract row. Never borrow a field from another asset.
 - Never invent roles such as `block`, `arrow_force`, or `velocity_indicator`.
 - If the list says there are no legal roles, `assets` MUST be [] and describe
   template-native visuals through `content`, `visible_objects`, and events.
@@ -253,6 +257,8 @@ ASSET ROLE CONTRACT:
 - `role` MUST be exactly one of the legal asset roles listed above.
 - `role` is a renderer/template-supported semantic slot, not the object's name.
 - `asset_id` is the actual visual object identity and must not be used as `role`.
+- `params` is scoped to the matching `asset_id`; use only the parameter names
+  listed on that asset's contract row. Never borrow a field from another asset.
 - Never invent roles such as `block`, `arrow_force`, or `velocity_indicator`.
 - If the list says there are no legal roles, `assets` MUST be [] and describe
   template-native visuals through `content`, `visible_objects`, and events.
@@ -658,40 +664,50 @@ def _semantic_plan_response_schema(
     supported_slots: dict[str, Any],
 ) -> dict[str, Any]:
     """Build the response contract from the selected template's canonical slots."""
-    supported_asset_ids = sorted({
-        str(asset_id)
-        for asset_ids_for_role in supported_slots.values()
-        for asset_id in _string_list(asset_ids_for_role)
-    })
-    asset_item: dict[str, Any] = {
-        "type": "object",
-        "required": ["role", "asset_id", "instance_id", "params"],
-        "properties": {
-            "role": {
-                "type": "string",
-                "enum": sorted(supported_slots),
+    # Bind each parameter object to exactly one asset ID. A flat union of
+    # parameter properties would allow a field belonging to one asset (for
+    # example, velocity_indicator.magnitude) on another asset such as
+    # arrow_force. Keep the variants shallow so the provider only has to
+    # process a single discriminated array-item object.
+    asset_variants: list[dict[str, Any]] = []
+    for role, role_asset_ids in sorted(supported_slots.items()):
+        for asset_id in sorted(_string_list(role_asset_ids)):
+            asset_variants.append({
+                "type": "object",
+                "required": ["role", "asset_id", "instance_id", "params"],
+                "properties": {
+                    "role": {"type": "string", "enum": [role]},
+                    "asset_id": {"type": "string", "enum": [asset_id]},
+                    "instance_id": {"type": "string"},
+                    "params": {
+                        "type": "object",
+                        "properties": ASSET_PARAM_SCHEMAS.get(asset_id, {}),
+                        "additionalProperties": False,
+                    },
+                },
+                "additionalProperties": False,
+            })
+
+    if asset_variants:
+        asset_item: dict[str, Any] = {"oneOf": asset_variants}
+    else:
+        # Keep a provider-safe item shape for native templates, whose array is
+        # separately constrained to zero items below.
+        asset_item = {
+            "type": "object",
+            "required": ["role", "asset_id", "instance_id", "params"],
+            "properties": {
+                "role": {"type": "string", "enum": []},
+                "asset_id": {"type": "string", "enum": []},
+                "instance_id": {"type": "string"},
+                "params": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
             },
-            "asset_id": {
-                "type": "string",
-                "enum": supported_asset_ids,
-            },
-            "instance_id": {"type": "string"},
-            "params": {"type": "object"},
-        },
-        "additionalProperties": False,
-    }
-    # NVIDIA's structured-output subset does not reliably accept conditional
-    # or oneOf schemas. Keep the schema provider-safe, but scope its fields to
-    # asset IDs legal for this template so unrelated parameters cannot leak in.
-    parameter_properties: dict[str, dict[str, Any]] = {}
-    for asset_id in supported_asset_ids:
-        asset_schema = ASSET_PARAM_SCHEMAS.get(asset_id, {})
-        parameter_properties.update(asset_schema)
-    asset_item["properties"]["params"] = {
-        "type": "object",
-        "properties": parameter_properties,
-        "additionalProperties": False,
-    }
+            "additionalProperties": False,
+        }
     assets_schema: dict[str, Any] = {
         "type": "array",
         "items": asset_item,

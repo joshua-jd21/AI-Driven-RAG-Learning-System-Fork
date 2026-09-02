@@ -30,6 +30,20 @@ from modules.manim.templates.segment_timing import (
 
 logger = get_logger(__name__)
 
+_EQUATION_TITLE_RUNTIME = 0.8
+_EQUATION_FORMULA_RUNTIME = 1.0
+_EQUATION_SYMBOL_RUNTIME = 1.1
+_EQUATION_TRANSFORM_RUNTIME = 0.9
+_EQUATION_ANSWER_RUNTIME = 0.9
+_CONCEPT_TITLE_RUNTIME = 0.8
+_CONCEPT_CARDS_RUNTIME = 0.8
+_CONCEPT_LABELS_RUNTIME = 1.0
+_CONCEPT_INDICATE_RUNTIME = 0.7
+_EXPLICIT_EQUATION_RE = re.compile(
+    r"(?:equation|formula)\s*[:\-]?\s*([^.;,\n]+=[^.;,\n]+)",
+    re.IGNORECASE,
+)
+
 FREEFORM_SYSTEM = """You are an expert Manim Community Edition (v0.18+) animator.
 You write COMPLETE, runnable Python files for short educational physics/science scenes.
 
@@ -109,6 +123,7 @@ class FreeformTemplate:
             visual_instruction=visual_instruction,
             audio_duration=audio_duration,
             timeline=timeline,
+            equation_text=_plan_equation(plan),
         )
         if "class GeneratedScene" not in code or "def construct" not in code:
             logger.warning("Freeform scene generation failed for scene %s; using stub", scene_id)
@@ -243,6 +258,7 @@ def _build_role_based_scene(
     visual_instruction: str,
     audio_duration: float,
     timeline: dict[str, Any],
+    equation_text: str | None = None,
 ) -> str:
     body_map = {
         "circuit": _circuit_scene_body,
@@ -252,14 +268,11 @@ def _build_role_based_scene(
         "concept": _concept_scene_body,
     }
     body_fn = body_map.get(family, _concept_scene_body)
-    body, elapsed = body_fn(
-        title,
-        learning_goal,
-        anchor_example,
-        narration,
-        visual_instruction,
-        timeline,
-    )
+    body_args = (title, learning_goal, anchor_example, narration, visual_instruction, timeline)
+    if family == "equation":
+        body, elapsed = body_fn(*body_args, equation_text=equation_text)
+    else:
+        body, elapsed = body_fn(*body_args)
     tail = max(0.5, audio_duration - elapsed - 0.4)
     return f"""from manim import *
 import numpy as np
@@ -383,36 +396,89 @@ def _equation_scene_body(
     narration: str,
     visual_instruction: str,
     timeline: dict[str, Any],
+    equation_text: str | None = None,
 ) -> tuple[str, float]:
     text = " ".join([title, learning_goal, anchor_example, narration, visual_instruction]).lower()
-    if "30" in text and "0.3" in text:
+    requested_equation = str(equation_text or "").strip()
+    if requested_equation:
+        equation_text = requested_equation
+        substitution_text = f"Using {equation_text}, substitute the known values"
+        answer_text = "Apply the relationship to the scenario"
+        symbol_labels = (
+            f"Equation: {equation_text}",
+            "Known quantities",
+            "Unknown quantity",
+        )
+    elif "30" in text and "0.3" in text:
         equation_text = "R = V / I"
         substitution_text = "R = 9 V / 0.3 A = 30 Ω"
         answer_text = "Resistance = 30 Ω"
+        symbol_labels = (
+            "V = voltage (V)",
+            "I = current (A)",
+            "R = resistance (Ω)",
+        )
     elif "12" in text and "4" in text:
         equation_text = "V = I × R"
         substitution_text = "12 V = I × 4 Ω"
         answer_text = "I = 3 A"
+        symbol_labels = (
+            "V = voltage (V)",
+            "I = current (A)",
+            "R = resistance (Ω)",
+        )
     else:
         equation_text = "V = I × R"
         substitution_text = "Use the relationship to substitute values"
         answer_text = "Solve for the unknown"
-    title_block = _title_block(title)
+        symbol_labels = (
+            "V = voltage (V)",
+            "I = current (A)",
+            "R = resistance (Ω)",
+        )
+    title_runtime = _EQUATION_TITLE_RUNTIME
+    formula_runtime = _EQUATION_FORMULA_RUNTIME
+    symbol_runtime = _EQUATION_SYMBOL_RUNTIME
+    transform_runtime = _EQUATION_TRANSFORM_RUNTIME
+    answer_runtime = _EQUATION_ANSWER_RUNTIME
+    title_block = _title_block(title, run_time=title_runtime)
     body = f"""{title_block}        formula_box = RoundedRectangle(corner_radius=0.14, width=4.6, height=0.9, color="#4f8ef7", fill_opacity=0.12, stroke_width=2).shift(UP*0.7)
         formula = Text({equation_text!r}, font_size=38, color="#e0e6f0", weight=BOLD).move_to(formula_box)
         symbol_row = VGroup(
-            Text("V = voltage (V)", font_size=24, color="#4f8ef7"),
-            Text("I = current (A)", font_size=24, color="#41d4a8"),
-            Text("R = resistance (Ω)", font_size=24, color="#ff7a59"),
+            Text({symbol_labels[0]!r}, font_size=24, color="#4f8ef7"),
+            Text({symbol_labels[1]!r}, font_size=24, color="#41d4a8"),
+            Text({symbol_labels[2]!r}, font_size=24, color="#ff7a59"),
         ).arrange(DOWN, aligned_edge=LEFT, buff=0.25).to_edge(LEFT, buff=0.8).shift(DOWN*0.6)
         substitution = Text({substitution_text!r}, font_size=30, color="#c8d3e6").to_edge(DOWN, buff=1.25)
         answer = Text({answer_text!r}, font_size=32, color="#41d4a8", weight=BOLD).next_to(formula_box, DOWN, buff=0.45)
-        self.play(FadeIn(formula_box), Write(formula), run_time=1.0)
-        self.play(LaggedStart(*[FadeIn(s) for s in symbol_row], lag_ratio=0.15), run_time=1.1)
-        self.play(ReplacementTransform(formula.copy(), substitution), run_time=0.9)
-        self.play(FadeIn(answer), Indicate(answer), run_time=0.9)
+        self.play(FadeIn(formula_box), Write(formula), run_time={formula_runtime:.3f})
+        self.play(LaggedStart(*[FadeIn(s) for s in symbol_row], lag_ratio=0.15), run_time={symbol_runtime:.3f})
+        self.play(ReplacementTransform(formula.copy(), substitution), run_time={transform_runtime:.3f})
+        self.play(FadeIn(answer), Indicate(answer), run_time={answer_runtime:.3f})
 """
-    return body, 5.0
+    elapsed = title_runtime + formula_runtime + symbol_runtime + transform_runtime + answer_runtime
+    return body, elapsed
+
+
+def _plan_equation(plan: dict[str, Any]) -> str | None:
+    """Return an explicitly requested equation without inventing one."""
+    for key in ("equation", "formula"):
+        value = plan.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    content = plan.get("content")
+    if isinstance(content, dict):
+        for key in ("equation", "formula"):
+            value = content.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    visual_instruction = str(plan.get("visual_instruction", ""))
+    match = _EXPLICIT_EQUATION_RE.search(visual_instruction)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 def _summary_scene_body(
@@ -452,7 +518,11 @@ def _concept_scene_body(
     visual_instruction: str,
     timeline: dict[str, Any],
 ) -> tuple[str, float]:
-    title_block = _title_block(title)
+    title_runtime = _CONCEPT_TITLE_RUNTIME
+    cards_runtime = _CONCEPT_CARDS_RUNTIME
+    labels_runtime = _CONCEPT_LABELS_RUNTIME
+    indicate_runtime = _CONCEPT_INDICATE_RUNTIME
+    title_block = _title_block(title, run_time=title_runtime)
     body = f"""{title_block}        cards = VGroup(
             RoundedRectangle(corner_radius=0.18, width=3.8, height=1.3, color="#4f8ef7", fill_opacity=0.12, stroke_width=2),
             RoundedRectangle(corner_radius=0.18, width=3.8, height=1.3, color="#41d4a8", fill_opacity=0.12, stroke_width=2),
@@ -464,8 +534,9 @@ def _concept_scene_body(
             Text({visual_instruction[:60]!r}, font_size=22, color="#e0e6f0"),
         ).arrange(DOWN, buff=0.45)
         labels.move_to(cards.get_center())
-        self.play(FadeIn(cards), run_time=0.8)
-        self.play(LaggedStart(*[FadeIn(label) for label in labels], lag_ratio=0.15), run_time=1.0)
-        self.play(Indicate(cards), run_time=0.7)
+        self.play(FadeIn(cards), run_time={cards_runtime:.3f})
+        self.play(LaggedStart(*[FadeIn(label) for label in labels], lag_ratio=0.15), run_time={labels_runtime:.3f})
+        self.play(Indicate(cards), run_time={indicate_runtime:.3f})
 """
-    return body, 3.8
+    elapsed = title_runtime + cards_runtime + labels_runtime + indicate_runtime
+    return body, elapsed
