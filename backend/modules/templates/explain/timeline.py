@@ -1,12 +1,12 @@
 """Ordered steps timeline chalkboard template."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from modules.templates.explain._base import (
     EXPLAIN_ALLOWED_EVENTS,
     audio_duration,
-    build_timing_waits,
     esc,
     events_literal,
     merge_content,
@@ -31,12 +31,10 @@ class TimelineTemplate:
         dur = audio_duration(timeline)
         events_json = events_literal(content.get("events", []))
 
-        waits = build_timing_waits(timeline, ["e0", "e1"], [0.3, 1.5])
-        pre_title_wait = f"{waits[0]}\n        " if waits[0] else ""
-
-        body = f"""{pre_title_wait}self.build_scene(
+        body = f"""self.build_scene(
             title_text="{esc(str(content.get('title', plan.get('title', 'Timeline'))))}",
             events={events_json},
             audio_duration={dur:.3f},
+            timeline={json.dumps(timeline, ensure_ascii=False)},
         )"""
         return wrap_explain_scene("timeline_scene", "TimelineScene", body)

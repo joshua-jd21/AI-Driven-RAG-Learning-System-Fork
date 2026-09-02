@@ -2,27 +2,83 @@
 
 from __future__ import annotations
 
+import os
+
+import requests
+
 import re
+
 import shutil
+
 import subprocess
+
 import time
+from dataclasses import asdict, dataclass
+
 from pathlib import Path
 
 from modules.config import (
+
     MANIM_MAX_RETRIES,
+
     MANIM_QUALITY,
+
     MANIM_REPAIR_MAX_CALLS,
+
     MANIM_REPAIR_TIMEOUT,
+
     NVIDIA_REPAIR_MODEL,
+    NVIDIA_PLANNER_MODEL,
+
     PATHS,
+
     RenderWorkspace,
+
     get_logger,
+
 )
 
 from modules.llm.nvidia_client import NvidiaClient
+
 from modules.manim.code_sanitize import is_latex_render_error, strip_latex_mobjects
+from modules.manim.render_validation import validate_static_source
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class RenderResult:
+    """Renderer provenance; a path alone cannot distinguish semantic output from fallback."""
+
+    artifact_path: Path
+    scene_path: Path
+    scene_class: str
+    render_status: str
+    semantic_render_succeeded: bool
+    primary_render_succeeded: bool
+    repair_attempted: bool
+    repair_succeeded: bool
+    fallback_used: bool
+    fallback_type: str | None
+    returncode: int | None
+    stdout: str
+    stderr: str
+    attempts: list[dict[str, object]]
+    static_validation: dict[str, object]
+
+    def as_dict(self) -> dict[str, object]:
+        data = asdict(self)
+        data["artifact_path"] = str(self.artifact_path)
+        data["scene_path"] = str(self.scene_path)
+        return data
+
+
+@dataclass
+class _Execution:
+    artifact_path: Path | None = None
+    returncode: int | None = None
+    stdout: str = ""
+    stderr: str = ""
 
 REPAIR_SYSTEM = """You are an expert Manim Community Edition debugger.
 Return ONLY the corrected Python file. No markdown fences, no commentary.
@@ -62,6 +118,7 @@ class GeneratedScene(Scene):
 """
 
 _last_error: str = ""
+_last_execution = _Execution()
 _llm_repair_disabled = False
 _llm_repair_attempts = 0
 
@@ -91,8 +148,14 @@ def render(
     scene_class: str = "GeneratedScene",
     fallback_code: str | None = None,
     workspace: RenderWorkspace | None = None,
-) -> Path:
+    return_report: bool = False,
+    expected_template: str | None = None,
+) -> Path | RenderResult:
     """Render a Manim scene file to MP4 with retry on failure."""
+    global _last_execution
+
+    # Keep each scene's process provenance isolated from the prior scene.
+    _last_execution = _Execution()
     media_dir = _media_dir(workspace)
     dest = _scene_dest(scene_py, workspace)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -103,16 +166,77 @@ def render(
         dest,
     )
 
+    try:
+        source = scene_py.read_text(encoding="utf-8")
+        static_validation = validate_static_source(
+            source,
+            scene_class,
+            expected_template=expected_template,
+        )
+    except OSError as exc:
+        static_validation = {
+            "passed": False,
+            "checks": [{"check": "source_read", "passed": False, "details": str(exc)}],
+            "failure_classifications": ["STATIC_VALIDATION_FAILED"],
+        }
+
+    attempts: list[dict[str, object]] = []
+    repair_attempted = False
+    repair_succeeded = False
+    fallback_used = "COMPILE_FALLBACK" in static_validation.get("failure_classifications", [])
+    fallback_type: str | None = "compile_stub" if fallback_used else None
+    primary_render_succeeded = False
+
+    def finish(status: str, semantic_success: bool) -> Path | RenderResult:
+        result = RenderResult(
+            artifact_path=dest,
+            scene_path=scene_py,
+            scene_class=scene_class,
+            render_status=status,
+            semantic_render_succeeded=semantic_success,
+            primary_render_succeeded=primary_render_succeeded,
+            repair_attempted=repair_attempted,
+            repair_succeeded=repair_succeeded,
+            fallback_used=fallback_used,
+            fallback_type=fallback_type,
+            returncode=_last_execution.returncode,
+            stdout=_last_execution.stdout,
+            stderr=_last_execution.stderr,
+            attempts=attempts,
+            static_validation=static_validation,
+        )
+        return result if return_report else result.artifact_path
+
+    if not static_validation.get("passed", False):
+        logger.error("Static validation failed for %s", scene_py)
+        return finish("static_validation_failed", False)
+
     for attempt in range(MANIM_MAX_RETRIES):
         mp4 = _run_manim(scene_py, scene_class, media_dir)
+        execution = _last_execution
+        attempts.append({
+            "attempt": attempt + 1,
+            "phase": "fallback" if fallback_used else ("repair" if repair_succeeded else "primary"),
+            "returncode": execution.returncode,
+            "artifact_path": str(mp4) if mp4 else None,
+            "stdout": execution.stdout,
+            "stderr": execution.stderr,
+        })
         if mp4 and mp4.exists():
             if mp4 != dest:
                 shutil.copy2(mp4, dest)
-            logger.info("Render success: %s (attempt %d)", dest, attempt + 1)
-            return dest
+            if not fallback_used:
+                primary_render_succeeded = not repair_succeeded
+                logger.info("Render success: %s (attempt %d)", dest, attempt + 1)
+                return finish("success", True)
+            logger.info("Fallback render produced artifact: %s", dest)
+            return finish("fallback", False)
 
         error = _last_error or "Unknown render error"
         logger.warning("Render attempt %d failed: %s", attempt + 1, error[:200])
+        if repair_succeeded:
+            # A repair is successful only when the repaired source also renders.
+            repair_succeeded = False
 
         if attempt < MANIM_MAX_RETRIES - 1:
             skip_llm = _should_skip_llm_repair(error)
@@ -120,13 +244,17 @@ def render(
             if is_latex_render_error(error):
                 repaired = _try_strip_latex(scene_py)
             if not repaired and not skip_llm and _can_attempt_llm_repair():
+                repair_attempted = True
                 repaired = _try_repair(scene_py, error)
+                repair_succeeded = repaired
             elif skip_llm and not repaired:
                 logger.warning(
                     "Skipping LLM repair for known error pattern; using template fallback for %s",
                     scene_py.name,
                 )
             if not repaired and fallback_code:
+                fallback_used = True
+                fallback_type = "template"
                 logger.warning(
                     "Repair unavailable; writing template fallback to %s",
                     scene_py,
@@ -134,18 +262,41 @@ def render(
                 scene_py.write_text(strip_latex_mobjects(fallback_code), encoding="utf-8")
 
     if fallback_code:
+        fallback_used = True
+        fallback_type = "template"
         logger.warning(
             "All LLM attempts failed; falling back to deterministic template for %s",
             scene_py.name,
         )
         scene_py.write_text(strip_latex_mobjects(fallback_code), encoding="utf-8")
         mp4 = _run_manim(scene_py, scene_class, media_dir)
+        execution = _last_execution
+        attempts.append({
+            "attempt": len(attempts) + 1,
+            "phase": "fallback",
+            "returncode": execution.returncode,
+            "artifact_path": str(mp4) if mp4 else None,
+            "stdout": execution.stdout,
+            "stderr": execution.stderr,
+        })
         if mp4 and mp4.exists():
             shutil.copy2(mp4, dest)
             logger.info("Template fallback render success: %s", dest)
-            return dest
+            return finish("fallback", False)
 
-    return _render_minimal_fallback(scene_py, scene_class, media_dir, dest)
+    fallback_used = True
+    fallback_type = "minimal_safe"
+    mp4, fallback_type = _render_minimal_fallback(scene_py, scene_class, media_dir, dest)
+    execution = _last_execution
+    attempts.append({
+        "attempt": len(attempts) + 1,
+        "phase": fallback_type,
+        "returncode": execution.returncode,
+        "artifact_path": str(mp4) if mp4 else None,
+        "stdout": execution.stdout,
+        "stderr": execution.stderr,
+    })
+    return finish("fallback", False)
 
 
 def _render_minimal_fallback(
@@ -153,7 +304,7 @@ def _render_minimal_fallback(
     scene_class: str,
     media_dir: Path,
     dest: Path,
-) -> Path:
+) -> tuple[Path, str]:
     """Guaranteed last-resort render so the pipeline never crashes on Manim failure."""
     for label, code in (
         ("minimal_safe", _MINIMAL_SAFE_SCENE),
@@ -169,7 +320,7 @@ def _render_minimal_fallback(
         if mp4 and mp4.exists():
             shutil.copy2(mp4, dest)
             logger.info("%s fallback render success: %s", label, dest)
-            return dest
+            return dest, label
 
     logger.error(
         "Minimal fallback renders failed for %s; writing placeholder mp4 path %s",
@@ -179,7 +330,7 @@ def _render_minimal_fallback(
     dest.parent.mkdir(parents=True, exist_ok=True)
     if not dest.exists():
         dest.touch()
-    return dest
+    return dest, "minimal_safe"
 
 
 def _find_scene_mp4(
@@ -207,7 +358,7 @@ def _find_scene_mp4(
 
 def _run_manim(scene_py: Path, scene_class: str, media_dir: Path) -> Path | None:
     """Execute manim CLI and locate output MP4."""
-    global _last_error
+    global _last_error, _last_execution
     manim_bin = shutil.which("manim") or "manim"
     cmd = [
         manim_bin,
@@ -233,19 +384,27 @@ def _run_manim(scene_py: Path, scene_class: str, media_dir: Path) -> Path | None
             cwd=backend_root,
             env=env,
         )
+        _last_execution = _Execution(
+            returncode=result.returncode,
+            stdout=result.stdout or "",
+            stderr=result.stderr or "",
+        )
         if result.returncode != 0:
             _last_error = result.stderr or result.stdout
             return None
 
         mp4 = _find_scene_mp4(media_dir, scene_py, scene_class, render_start)
         if mp4:
+            _last_execution.artifact_path = mp4
             return mp4
         _last_error = "No MP4 output found after render"
         return None
     except subprocess.TimeoutExpired:
+        _last_execution = _Execution(stderr="Manim render timed out after 300s")
         _last_error = "Manim render timed out after 300s"
         return None
     except Exception as exc:
+        _last_execution = _Execution(stderr=str(exc))
         _last_error = str(exc)
         return None
 
@@ -317,13 +476,7 @@ def _try_repair(scene_py: Path, error: str) -> bool:
                 "content": REPAIR_PROMPT.format(error=error[:3000], code=code[:8000]),
             },
         ]
-        fixed = client.chat(
-            NVIDIA_REPAIR_MODEL,
-            messages,
-            temperature=0.1,
-            max_tokens=8192,
-            timeout=MANIM_REPAIR_TIMEOUT,
-        )
+        fixed = _chat_with_repair_fallback(client, messages)
     except Exception as exc:
         logger.warning("Repair LLM call failed: %s", exc)
         _disable_llm_repair(str(exc))
@@ -346,3 +499,31 @@ def _try_repair(scene_py: Path, error: str) -> bool:
     logger.warning("Repair output invalid; keeping original")
     _disable_llm_repair("invalid repair output")
     return False
+
+
+def _chat_with_repair_fallback(client: NvidiaClient, messages: list[dict[str, str]]) -> str:
+    """Retry the same repair request with the verified planner model on a 404."""
+    models = [NVIDIA_REPAIR_MODEL]
+    if NVIDIA_REPAIR_MODEL != NVIDIA_PLANNER_MODEL:
+        models.append(NVIDIA_PLANNER_MODEL)
+
+    for index, model in enumerate(models):
+        try:
+            return client.chat(
+                model,
+                messages,
+                temperature=0.1,
+                max_tokens=8192,
+                timeout=MANIM_REPAIR_TIMEOUT,
+            )
+        except requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            if status == 404 and index == 0 and len(models) > 1:
+                logger.warning(
+                    "Repair model %s returned HTTP 404; retrying this repair with planner model %s",
+                    model,
+                    NVIDIA_PLANNER_MODEL,
+                )
+                continue
+            raise
+    raise RuntimeError("No configured repair model available")

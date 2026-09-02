@@ -45,9 +45,9 @@ def build_event_timeline(
         }
     """
     timed: list[dict[str, Any]] = []
-    last_end = 0.0  # tracks sequential upper bound
 
-    for ev in events:
+    scheduled: list[tuple[float, int, dict[str, Any], tuple[float, float] | None]] = []
+    for idx, ev in enumerate(events):
         eid = ev["id"]
         phrase = ev.get("anchor_phrase", "").strip()
         phase = ev.get("phase", "on")
@@ -56,16 +56,39 @@ def build_event_timeline(
 
         # Locate phrase in word timestamps
         span = _find_phrase_span(phrase, word_timestamps) if phrase and word_timestamps else None
-
         if span is not None:
             phrase_start, phrase_end = span
             phrase_dur = phrase_end - phrase_start
             offset = PHASE_OFFSET.get(phase, 0.0)
             if phase == "after":
                 offset = phrase_dur
-            start = max(phrase_start + offset, last_end)
+            target_start = phrase_start + offset
         else:
-            # Fallback: place event right after the previous one with a small gap
+            target_start = float("inf")
+
+        scheduled.append((target_start, idx, ev, span))
+
+    # Keep narratively aligned events first, then place any unanchored events in
+    # their original order after all matched phrases.
+    scheduled.sort(key=lambda item: (
+        item[0] == float("inf"),
+        item[0],
+        item[1],
+    ))
+
+    last_end = 0.0  # tracks sequential upper bound
+    for target_start, _idx, ev, span in scheduled:
+        eid = ev["id"]
+        phrase = ev.get("anchor_phrase", "").strip()
+        importance = max(1, min(5, int(ev.get("importance", 3))))
+        ev_type = ev.get("type", "")
+
+        if span is not None:
+            phrase_start, phrase_end = span
+            phrase_dur = phrase_end - phrase_start
+            start = max(target_start, last_end)
+        else:
+            # Fallback: place unanchored events after the current cursor.
             start = last_end + 0.2
 
         # run_time

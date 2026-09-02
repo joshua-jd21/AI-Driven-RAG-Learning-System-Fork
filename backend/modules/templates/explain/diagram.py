@@ -6,7 +6,6 @@ from typing import Any
 from modules.templates.explain._base import (
     EXPLAIN_ALLOWED_EVENTS,
     audio_duration,
-    build_timing_waits,
     esc,
     merge_content,
     nodes_literal,
@@ -30,13 +29,15 @@ class DiagramTemplate:
         content = merge_content(plan, "diagram")
         dur = audio_duration(timeline)
         nodes_json = nodes_literal(content.get("nodes", []))
+        # Generated files are Python, so use Python literals rather than JSON
+        # booleans (JSON's true/false are invalid Python expressions).
+        timeline_json = repr(timeline)
 
-        waits = build_timing_waits(timeline, ["e0", "e1"], [0.3, 1.5])
-        pre_title_wait = f"{waits[0]}\n        " if waits[0] else ""
-
-        body = f"""{pre_title_wait}self.build_scene(
+        body = f"""self.build_scene(
             title_text="{esc(str(content.get('title', plan.get('title', 'Diagram'))))}",
             nodes={nodes_json},
             audio_duration={dur:.3f},
+            timeline={timeline_json},
+            caption_text="{esc(str(plan.get('visual_instruction', '')))}",
         )"""
         return wrap_explain_scene("diagram_scene", "DiagramScene", body)

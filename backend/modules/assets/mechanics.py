@@ -21,6 +21,110 @@ ASSET_IDS: dict[str, str] = {
     "acceleration_trail": "Motion trail dots showing acceleration",
 }
 
+# These are the named colors and palette values already used by the mechanics
+# templates.  Keeping this contract here lets planning and code generation
+# validate the same values without importing Manim into the planner.
+SUPPORTED_COLOR_VALUES = (
+    "red", "blue", "green", "yellow", "orange", "pink", "white", "black",
+    "gray", "grey", "#f7c948", "#41d4a8", "#ff7a59", "#4fc3f7",
+    "#e0e6f0", "#c8d3e6", "#909090", "#8b6914", "#c8d8f0", "#a0b8e0",
+    "#6b8cba",
+)
+
+ASSET_PARAM_SCHEMAS: dict[str, dict[str, dict[str, Any]]] = {
+    "block": {
+        "label": {"type": "string"},
+        "color": {"type": "string", "enum": list(SUPPORTED_COLOR_VALUES)},
+        "width": {"type": "number", "minimum": 0.1},
+        "height": {"type": "number", "minimum": 0.1},
+    },
+    "hockey_puck": {
+        "label": {"type": "string"},
+    },
+    "car": {
+        "label": {"type": "string"},
+        "color": {"type": "string", "enum": list(SUPPORTED_COLOR_VALUES)},
+    },
+    "inclined_plane": {
+        "angle": {"type": "number", "minimum": 0.0, "maximum": 89.0},
+        "width": {"type": "number", "minimum": 0.1},
+    },
+    "ground": {
+        "texture": {"type": "string", "enum": ["grass", "ice", "rough", "ground"]},
+        "extent": {"type": "number", "minimum": 0.1},
+    },
+    "wall": {
+        "side": {"type": "string", "enum": ["left", "right"]},
+    },
+    "arrow_force": {
+        "label": {"type": "string"},
+        "direction": {"type": "string", "enum": ["LEFT", "RIGHT", "UP", "DOWN", "left", "right", "up", "down"]},
+        "color": {"type": "string", "enum": list(SUPPORTED_COLOR_VALUES)},
+        "length": {"type": "number", "minimum": 0.1},
+    },
+    "velocity_indicator": {
+        "color": {"type": "string", "enum": list(SUPPORTED_COLOR_VALUES)},
+        "magnitude": {"type": "number", "minimum": 0.1},
+    },
+    "acceleration_trail": {},
+}
+
+
+def validate_params(asset_id: str, params: dict[str, Any] | None) -> dict[str, Any]:
+    """Validate planner parameters before an asset reaches code generation."""
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        raise ValueError(
+            f"Invalid params for asset '{asset_id}': expected an object, got {type(params).__name__}"
+        )
+    schema = ASSET_PARAM_SCHEMAS.get(asset_id)
+    if schema is None:
+        raise ValueError(f"Unknown asset_id '{asset_id}'")
+
+    for name, value in params.items():
+        rule = schema.get(name)
+        if rule is None:
+            raise ValueError(
+                f"Invalid parameter '{name}' for asset '{asset_id}': unsupported parameter"
+            )
+        expected_type = rule["type"]
+        if expected_type == "number":
+            if isinstance(value, bool):
+                valid_number = False
+            else:
+                try:
+                    valid_number = math.isfinite(float(value))
+                except (TypeError, ValueError):
+                    valid_number = False
+            minimum = rule.get("minimum")
+            maximum = rule.get("maximum")
+            if valid_number and minimum is not None:
+                valid_number = float(value) >= minimum
+            if valid_number and maximum is not None:
+                valid_number = float(value) <= maximum
+            if not valid_number:
+                bounds = ""
+                if minimum is not None:
+                    bounds += f", minimum {minimum}"
+                if maximum is not None:
+                    bounds += f", maximum {maximum}"
+                raise ValueError(
+                    f"Invalid parameter '{name}' for asset '{asset_id}': {value!r}; "
+                    f"expected a finite numeric value{bounds}"
+                )
+        elif expected_type == "string" and not isinstance(value, str):
+            raise ValueError(
+                f"Invalid parameter '{name}' for asset '{asset_id}': {value!r}; "
+                "expected a string"
+            )
+        if "enum" in rule and value not in rule["enum"]:
+            raise ValueError(
+                f"Invalid parameter '{name}' for asset '{asset_id}': {value!r}; "
+                f"expected one of {rule['enum']}"
+            )
+    return dict(params)
+
 
 def get_code(asset_id: str, instance_id: str, params: dict[str, Any]) -> str:
     """Return un-indented Python code that creates the Manim VGroup `instance_id`."""
@@ -38,7 +142,7 @@ def get_code(asset_id: str, instance_id: str, params: dict[str, Any]) -> str:
     fn = builders.get(asset_id)
     if fn is None:
         raise ValueError(f"Unknown asset_id '{asset_id}'. Valid: {sorted(builders)}")
-    return fn(instance_id, params)
+    return fn(instance_id, validate_params(asset_id, params))
 
 
 def get_position_hint(asset_id: str) -> str:
@@ -61,11 +165,34 @@ def get_position_hint(asset_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _numeric_param(asset_id: str, params: dict, name: str, default: float) -> float:
+    """Validate numeric asset parameters before they enter code generation."""
+    value = params.get(name, default)
+    if isinstance(value, bool):
+        raise ValueError(
+            f"Invalid parameter '{name}' for asset '{asset_id}': {value!r}; "
+            "expected a finite numeric value"
+        )
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid parameter '{name}' for asset '{asset_id}': {value!r}; "
+            "expected a finite numeric value"
+        ) from exc
+    if not math.isfinite(parsed):
+        raise ValueError(
+            f"Invalid parameter '{name}' for asset '{asset_id}': {value!r}; "
+            "expected a finite numeric value"
+        )
+    return parsed
+
+
 def _block(v: str, p: dict) -> str:
     label = p.get("label", "")
     color = p.get("color", "#f7c948")
-    w = float(p.get("width", 1.4))
-    h = float(p.get("height", 0.9))
+    w = _numeric_param("block", p, "width", 1.4)
+    h = _numeric_param("block", p, "height", 0.9)
     lines = [
         f'{v}_rect = Rectangle(width={w}, height={h}, color="{color}", fill_opacity=0.88, stroke_width=2)',
     ]
@@ -121,8 +248,8 @@ def _car(v: str, p: dict) -> str:
 
 
 def _inclined_plane(v: str, p: dict) -> str:
-    angle_deg = float(p.get("angle", 30))
-    width = float(p.get("width", 4.0))
+    angle_deg = _numeric_param("inclined_plane", p, "angle", 30)
+    width = _numeric_param("inclined_plane", p, "width", 4.0)
     height = width * math.tan(math.radians(angle_deg))
     return "\n".join([
         f'{v} = Polygon(',
@@ -133,7 +260,7 @@ def _inclined_plane(v: str, p: dict) -> str:
 
 
 def _ground(v: str, p: dict) -> str:
-    extent = float(p.get("extent", 7.0))
+    extent = _numeric_param("ground", p, "extent", 7.0)
     texture = p.get("texture", "ground")
     color_map = {"grass": "#7ecfa0", "ice": "#a8d8ea", "rough": "#c09060", "ground": "#909090"}
     color = color_map.get(texture, "#909090")
@@ -159,7 +286,7 @@ def _arrow_force(v: str, p: dict) -> str:
     label = p.get("label", "F")
     direction = p.get("direction", "RIGHT").upper()
     color = p.get("color", "#ff7a59")
-    length = float(p.get("length", 1.6))
+    length = _numeric_param("arrow_force", p, "length", 1.6)
     dir_vec = {"RIGHT": f"RIGHT*{length:.2f}", "LEFT": f"LEFT*{length:.2f}",
                "UP": f"UP*{length:.2f}", "DOWN": f"DOWN*{length:.2f}"}
     label_side = {"RIGHT": "UP", "LEFT": "UP", "UP": "RIGHT", "DOWN": "RIGHT"}
@@ -178,7 +305,7 @@ def _arrow_force(v: str, p: dict) -> str:
 
 
 def _velocity_indicator(v: str, p: dict) -> str:
-    mag = float(p.get("magnitude", 1.2))
+    mag = _numeric_param("velocity_indicator", p, "magnitude", 1.2)
     color = p.get("color", "#4fc3f7")
     return "\n".join([
         f'{v} = VGroup(',

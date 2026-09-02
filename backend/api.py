@@ -98,6 +98,7 @@ from modules.planning.narration_writer import write_all_narrations
 from modules.planning.learner_context_service import get_learner_context
 from modules.planning.asset_registry import reset_registry
 from modules.planning.grounding_validator import validate_storyboard_grounding, log_grounding_issues
+from modules.retrieval.pageindex_retriever import format_sections_for_prompt
 
 from modules.retrieval.pageindex_retriever import (
     clear_artifacts_cache,
@@ -661,20 +662,37 @@ async def run_pipeline_task(
         explanation_package = None
         try:
             client = NvidiaClient()
-            prompt = (
-                f"CURRICULUM CONTEXT:\n{curriculum_context}\n\n"
-                f"{learner_context_block}\n\n"
-                f"LESSON SUBJECT: {subject}\n"
-                f"LESSON TOPIC: {topic}\n\n"
-                f"Generate a structured educational blueprint with "
-                "learning objectives, prerequisites, and 2-3 DIFFERENT real-world analogies "
-                "calibrated to the learner above. Each analogy must be distinct."
-            )
+            sections_block = format_sections_for_prompt(curriculum_sections) if curriculum_sections else ""
+            prompt_parts = [
+                f"CURRICULUM CONTEXT:\n{curriculum_context}",
+            ]
+            if sections_block:
+                prompt_parts.append(sections_block)
+            prompt_parts.extend([
+                learner_context_block,
+                f"LESSON SUBJECT: {subject}",
+                f"LESSON TOPIC: {topic}",
+                "",
+                "Generate a structured educational blueprint grounded in the textbook evidence above.",
+                "The explanation must include:",
+                "- the precise definition of the topic",
+                "- the governing equation or relationship",
+                "- the meaning and SI units of every symbol",
+                "- the relationship between the variables",
+                "- the conditions or limitations under which it applies",
+                "- an intuitive everyday explanation",
+                "- one worked numerical example with a final answer",
+                "- 2-3 DIFFERENT real-world analogies calibrated to the learner above",
+                "Do not drift to prior topics. Do not summarize the storyboard. Explain the actual lesson.",
+            ])
+            prompt = "\n\n".join(prompt_parts)
             messages = [
-                {"role": "system", "content": "You are a professional NCERT/CBSE explanation assistant. Use the curriculum context as the primary source of truth. Personalize content to the LEARNER CONTEXT below. Respond ONLY with a valid JSON object matching this schema: {\"topic\": \"...\", \"learning_objectives\": [\"...\"], \"core_explanation\": \"...\", \"analogies\": [\"...\"], \"prerequisites\": [\"...\"]}. Do not use markdown blocks or formatting fences."},
+                {"role": "system", "content": "You are a professional NCERT/CBSE explanation assistant. Use the curriculum evidence as the primary source of truth. Personalize content to the LEARNER CONTEXT below. Respond ONLY with a valid JSON object matching this schema: {\"topic\": \"...\", \"learning_objectives\": [\"...\"], \"core_explanation\": \"...\", \"analogies\": [\"...\"], \"prerequisites\": [\"...\"]}. The core_explanation must be a complete teaching explanation with definition, equation, units, intuition, conditions, and a worked example. Do not use markdown blocks or formatting fences."},
                 {"role": "user", "content": prompt}
             ]
             raw_expl = client.chat_json(modules.config.NVIDIA_PLANNER_MODEL, messages, temperature=0.4, max_tokens=1024)
+            if isinstance(raw_expl, list) and raw_expl and isinstance(raw_expl[0], dict):
+                raw_expl = raw_expl[0]
             if isinstance(raw_expl, dict) and "topic" in raw_expl:
                 explanation_package = raw_expl
         except Exception as e:
@@ -685,14 +703,20 @@ async def run_pipeline_task(
             explanation_package = {
                 "topic": topic,
                 "learning_objectives": [
-                    f"Understand the core physics principles of {topic}.",
-                    f"Analyze real-world scenarios representing {topic}."
+                    f"Explain the definition and governing relationship for {topic}.",
+                    f"Interpret the symbols, units, and conditions for {topic}.",
+                    f"Apply {topic} to a worked numerical example."
                 ],
-                "core_explanation": f"This lesson explores {topic}. We examine the fundamental definitions, equations, and mechanics involved.",
+                "core_explanation": (
+                    f"This lesson explains {topic} using the textbook evidence above. "
+                    f"It defines the law or relationship, states the equation, explains the meaning and units of each symbol, "
+                    f"describes when it applies, connects the variables intuitively, and finishes with a worked numerical example."
+                ),
                 "analogies": [
-                    f"Like a sliding puck on smooth ice representing frictionless motion, {topic} describes how systems behave under physical constraints."
+                    f"Like water pressure driving flow through a narrow pipe, {topic} links driving force, flow, and restriction.",
+                    f"Like pushing a cart harder to make it move faster, the same relationship shows how stronger drive produces more response."
                 ],
-                "prerequisites": ["Basic Physical Quantities", "Concept of Forces"]
+                "prerequisites": ["Basic Physical Quantities", "Units and Measurement", "Electric Current and Potential Difference"]
             }
 
         await queue.put({
@@ -809,7 +833,7 @@ async def run_pipeline_task(
         
         # Read the generated Manim code and concatenate for Script Inspector!
         manim_code_combined = ""
-        for manim_py, fallback_code in manim_files:
+        for manim_py, fallback_code, scene_class in manim_files:
             if manim_py.exists():
                 with open(manim_py, "r", encoding="utf-8") as f:
                     manim_code_combined += f.read() + "\n\n# " + "="*60 + "\n\n"
@@ -828,8 +852,13 @@ async def run_pipeline_task(
         # --- Stage 7: Render scenes ---
         await queue.put({"stage": "generating", "progress": 92, "message": "[7/8] Spawning Manim Community engine to render vector animations..."})
         scene_mp4s = []
-        for manim_py, fallback_code in manim_files:
-            mp4 = render(manim_py, fallback_code=fallback_code, workspace=workspace)
+        for manim_py, fallback_code, scene_class in manim_files:
+            mp4 = render(
+                manim_py,
+                scene_class=scene_class,
+                fallback_code=fallback_code,
+                workspace=workspace,
+            )
             scene_mp4s.append(mp4)
 
         # --- Stage 8: Merge audio + video ---

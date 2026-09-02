@@ -55,7 +55,7 @@ LESSON TOPIC: {topic}
 
 {learner_context}
 
-concept_template must always be one actual registered template ID. Family names below are guidance only and must never be output as values. Prefer the most specific registered ID for the scene; use freeform only when no registered ID fits.
+concept_template must always be one of the canonical registered template IDs listed below. Use only the provided canonical template names. Never prefix, suffix, categorize, or invent template names. Family names below are guidance only and must never be output as values. Prefer the most specific registered ID for the scene; use freeform only when no registered ID fits.
 
 Registered template IDs:
 - Mechanics: {mechanics_ids}
@@ -64,6 +64,11 @@ Registered template IDs:
 - freeform
 
 Arc: hook → visual_intuition → formal_concept → worked_example → summary.
+
+Every scene must include a `visual_instruction` field that names concrete
+animated objects, labels, and transitions. The instruction should be specific
+enough for a Manim generator to draw the scene without inventing unrelated
+content.
 
 Return a JSON array of exactly 5 objects:
 [
@@ -75,7 +80,8 @@ Return a JSON array of exactly 5 objects:
     "anchor_example": "<short hook>",
     "learning_goal": "introduce the concept",
     "subtitle": "<one-line tagline>",
-    "key_term": "<central term>"
+    "key_term": "<central term>",
+    "visual_instruction": "<concrete on-screen objects and animation beat>"
   }},
   {{
     "scene_id": 2,
@@ -83,7 +89,8 @@ Return a JSON array of exactly 5 objects:
     "scene_role": "visual_intuition",
     "title": "...",
     "anchor_example": "<example>",
-    "learning_goal": "<goal>"
+    "learning_goal": "<goal>",
+    "visual_instruction": "<concrete on-screen objects and animation beat>"
   }},
   {{
     "scene_id": 3,
@@ -91,7 +98,8 @@ Return a JSON array of exactly 5 objects:
     "scene_role": "formal_concept",
     "title": "...",
     "anchor_example": "<example>",
-    "learning_goal": "<goal>"
+    "learning_goal": "<goal>",
+    "visual_instruction": "<concrete on-screen objects and animation beat>"
   }},
   {{
     "scene_id": 4,
@@ -99,7 +107,8 @@ Return a JSON array of exactly 5 objects:
     "scene_role": "worked_example",
     "title": "...",
     "anchor_example": "<example>",
-    "learning_goal": "<goal>"
+    "learning_goal": "<goal>",
+    "visual_instruction": "<concrete on-screen objects and animation beat>"
   }},
   {{
     "scene_id": 5,
@@ -108,10 +117,45 @@ Return a JSON array of exactly 5 objects:
     "title": "Key Takeaways",
     "anchor_example": "all scenarios",
     "learning_goal": "consolidate learning",
-    "summary_points": ["...", "...", "..."]
+    "summary_points": ["...", "...", "..."],
+    "visual_instruction": "<relationship diagram or summary visual>"
   }}
 ]
 """
+
+STORYBOARD_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "minItems": 5,
+    "maxItems": 5,
+    "items": {
+        "type": "object",
+        "required": [
+            "scene_id",
+            "concept_template",
+            "scene_role",
+            "title",
+            "anchor_example",
+            "learning_goal",
+            "visual_instruction",
+        ],
+        "properties": {
+            "scene_id": {"type": "integer"},
+            "concept_template": {"type": "string", "enum": VALID_TEMPLATE_IDS},
+            "scene_role": {"type": "string"},
+            "title": {"type": "string"},
+            "anchor_example": {"type": "string"},
+            "learning_goal": {"type": "string"},
+            "subtitle": {"type": "string"},
+            "key_term": {"type": "string"},
+            "summary_points": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "visual_instruction": {"type": "string"},
+        },
+        "additionalProperties": False,
+    },
+}
 
 
 def _build_curriculum_anchor(curriculum_context: str, curriculum_sections: list | None) -> str:
@@ -172,16 +216,38 @@ def build_storyboard(
         {"role": "system", "content": STORYBOARD_SYSTEM},
         {"role": "user", "content": prompt},
     ]
-    raw = client.chat_json(NVIDIA_PLANNER_MODEL, messages, temperature=0.55, max_tokens=4096)
+    request_overrides = {
+        "chat_template_kwargs": {
+            "enable_thinking": False,
+        },
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "StoryboardScenes",
+                "schema": STORYBOARD_RESPONSE_SCHEMA,
+            },
+        },
+    }
+    raw = client.chat_json(
+        NVIDIA_PLANNER_MODEL,
+        messages,
+        temperature=0.55,
+        max_tokens=4096,
+        extra_body=request_overrides,
+    )
+    logger.info("Storyboard parsed payload: %s", _summarize_storyboard_payload(raw))
 
-    if isinstance(raw, dict) and "scenes" in raw:
-        raw = raw["scenes"]
-    if not isinstance(raw, list):
-        raise ValueError(f"Storyboard LLM returned {type(raw)}, expected list")
+    raw_scenes = _unwrap_storyboard_scenes(raw)
 
     validated = [
-        _validate_entry(entry, idx, topic=topic, curriculum_sections=curriculum_sections)
-        for idx, entry in enumerate(raw, start=1)
+        _validate_entry(
+            entry,
+            idx,
+            topic=topic,
+            curriculum_sections=curriculum_sections,
+            subject=subject,
+        )
+        for idx, entry in enumerate(raw_scenes, start=1)
     ]
     validated[0]["concept_template"] = "intro"
     validated[0]["scene_role"] = "hook"
@@ -196,6 +262,41 @@ def build_storyboard(
     return validated
 
 
+def _unwrap_storyboard_scenes(raw: Any) -> list[dict[str, Any]]:
+    """Accept the documented raw list or the known `{\"scenes\": [...]}` envelope."""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict) and "scenes" in raw:
+        scenes = raw["scenes"]
+        if isinstance(scenes, list):
+            return scenes
+        raise ValueError(
+            f"Storyboard LLM returned 'scenes' as {type(scenes)}, expected list"
+        )
+    raise ValueError(f"Storyboard LLM returned {type(raw)}, expected list")
+
+
+def _summarize_storyboard_payload(raw: Any, preview_limit: int = 1000) -> str:
+    """Create a safe, compact summary for storyboard parse diagnostics."""
+    if isinstance(raw, dict):
+        preview_source = json.dumps(raw, ensure_ascii=False, default=str)
+        preview = preview_source[:preview_limit]
+        if len(preview_source) > preview_limit:
+            preview += "..."
+        return f"type=dict keys={list(raw.keys())[:10]} preview={preview}"
+    if isinstance(raw, list):
+        preview_source = json.dumps(raw, ensure_ascii=False, default=str)
+        preview = preview_source[:preview_limit]
+        if len(preview_source) > preview_limit:
+            preview += "..."
+        return f"type=list len={len(raw)} preview={preview}"
+
+    preview = repr(raw)
+    if len(preview) > preview_limit:
+        preview = preview[:preview_limit] + "..."
+    return f"type={type(raw).__name__} preview={preview}"
+
+
 _VALID_SCENE_ROLES = frozenset({
     "hook", "visual_intuition", "formal_concept", "worked_example", "summary",
 })
@@ -208,6 +309,7 @@ def _validate_entry(
     default_id: int,
     topic: str = "",
     curriculum_sections: list | None = None,
+    subject: str = "Physics",
 ) -> dict[str, Any]:
     scene_id = int(entry.get("scene_id", default_id))
     template = str(entry.get("concept_template", "intro"))
@@ -224,7 +326,17 @@ def _validate_entry(
     # Chemistry router override: if topic/tags suggest chemistry and template is generic,
     # replace with the most appropriate chemistry template.
     scene_role = str(entry.get("scene_role", ""))
-    if template not in ("intro", "summary") and template not in CHEMISTRY_TEMPLATE_IDS:
+    subject_lower = subject.strip().lower()
+    chemistry_allowed = subject_lower == "chemistry"
+
+    if subject_lower != "chemistry" and template in CHEMISTRY_TEMPLATE_IDS:
+        logger.warning(
+            "Scene %d requested chemistry template '%s' under subject=%r; downgrading to 'freeform'",
+            scene_id, template, subject,
+        )
+        template = "freeform"
+
+    if chemistry_allowed and template not in ("intro", "summary") and template not in CHEMISTRY_TEMPLATE_IDS:
         top_section = (curriculum_sections or [{}])[0] if curriculum_sections else {}
         chem_override = route_chemistry_template(
             topic=topic,
@@ -242,6 +354,7 @@ def _validate_entry(
     result: dict[str, Any] = {
         "scene_id": scene_id,
         "concept_template": template,
+        "subject": subject,
         "title": str(entry.get("title", entry.get("anchor_example", f"Scene {scene_id}"))),
         "anchor_example": str(entry.get("anchor_example", "")),
         "learning_goal": str(entry.get("learning_goal", "")),
@@ -255,6 +368,8 @@ def _validate_entry(
         result["subtitle"] = str(entry["subtitle"])
     if "key_term" in entry:
         result["key_term"] = str(entry["key_term"])
+    if "visual_instruction" in entry:
+        result["visual_instruction"] = str(entry["visual_instruction"])
     if "summary_points" in entry and isinstance(entry["summary_points"], list):
         result["summary_points"] = [str(p) for p in entry["summary_points"][:4]]
     return result

@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 
 from modules.config import FINAL_VIDEO, ensure_api_keys, get_logger
 from modules.manim.renderer import render
+from modules.manim.render_validation import validate_render_result
 from modules.manim.semantic_compiler import semantic_compile_all
 from modules.planning.asset_registry import reset_registry
 from modules.planning.narration_writer import write_all_narrations
@@ -115,9 +116,45 @@ def run(topic: str, document_id: str | None = None, subject: str = "Physics") ->
     # ── Step 7: Render ────────────────────────────────────────────────
     logger.info("[7/8] Rendering Manim scenes")
     scene_mp4s: list[Path] = []
-    for manim_py, fallback_code in manim_files:
-        mp4 = render(manim_py, fallback_code=fallback_code)
-        scene_mp4s.append(mp4)
+    proof_reports: list[dict] = []
+    timeline_by_scene = {item["scene_id"]: item for item in timelines}
+    for plan, (manim_py, fallback_code, scene_class) in zip(plans, manim_files):
+        render_result = render(
+            manim_py,
+            scene_class=scene_class,
+            fallback_code=fallback_code,
+            return_report=True,
+            expected_template=plan.get("concept_template"),
+        )
+        expected_duration = float(
+            timeline_by_scene[plan["scene_id"]].get("audio_duration", 0.0)
+        )
+        proof = validate_render_result(
+            render_result,
+            scene_id=plan["scene_id"],
+            template=plan.get("concept_template", "unknown"),
+            expected_duration=expected_duration,
+        )
+        proof_reports.append(proof)
+        if proof["verdict"] == "PASS":
+            scene_mp4s.append(render_result.artifact_path)
+        else:
+            logger.error(
+                "[PHASE1][FAIL] scene=%s template=%s failures=%s expected=%.3fs actual=%s",
+                proof["scene_id"],
+                proof["template"],
+                proof["failure_classifications"],
+                proof["expected_duration"],
+                proof["actual_raw_duration"],
+            )
+
+    failed_proofs = [report for report in proof_reports if report["verdict"] != "PASS"]
+    if failed_proofs:
+        failed_scenes = [report["scene_id"] for report in failed_proofs]
+        raise RuntimeError(
+            "Phase 1 render proof failed for scene(s): "
+            + ", ".join(str(scene_id) for scene_id in failed_scenes)
+        )
 
     # ── Step 8: Merge ─────────────────────────────────────────────────
     logger.info("[8/8] Merging audio + video (FFmpeg)")

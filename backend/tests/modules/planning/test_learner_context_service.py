@@ -100,7 +100,14 @@ def test_lesson_prompt_receives_topic_and_subject(monkeypatch, tmp_path):
     captured = {}
 
     class FakeClient:
-        def chat_json(self, model, messages, temperature=0.0, max_tokens=0):
+        def chat_json(
+            self,
+            model,
+            messages,
+            temperature=0.0,
+            max_tokens=0,
+            extra_body=None,
+        ):
             captured["messages"] = messages
             return [
                 {

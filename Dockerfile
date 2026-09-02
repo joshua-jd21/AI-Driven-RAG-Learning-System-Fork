@@ -4,12 +4,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive \
+    OLLAMA_HOST=http://host.docker.internal:11434 \
     PORT=5000
 
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    build-essential \
     ffmpeg \
     fontconfig \
     fonts-dejavu-core \

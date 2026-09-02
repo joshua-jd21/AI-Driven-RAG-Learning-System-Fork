@@ -14,11 +14,16 @@ Fallback hierarchy (per scene):
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 from modules.config import PATHS, RenderWorkspace, get_logger
-from modules.manim.code_sanitize import has_latex_mobjects, strip_latex_mobjects
+from modules.manim.code_sanitize import (
+    has_latex_mobjects,
+    strip_latex_in_text_literals,
+    strip_latex_mobjects,
+)
 from modules.templates import TEMPLATES
 
 logger = get_logger(__name__)
@@ -52,9 +57,20 @@ def _resolve_template(plan: dict[str, Any]) -> tuple[type, str, str]:
     template_id = plan.get("concept_template", "intro")
     scene_id = plan.get("scene_id", "?")
     template_cls = TEMPLATES.get(template_id)
+    subject = str(plan.get("subject", "")).strip().lower()
+    chemistry_allowed = not subject or subject == "chemistry"
 
     from modules.templates.chemistry import CHEMISTRY_TEMPLATE_IDS
     if template_id in CHEMISTRY_TEMPLATE_IDS and template_cls is not None:
+        if not chemistry_allowed:
+            logger.info(
+                "[TEMPLATE] scene=%s requested=%s resolved=freeform "
+                "source=subject_guard subject=%r",
+                scene_id,
+                template_id,
+                subject or None,
+            )
+            return TEMPLATES["freeform"], "freeform", "subject_guard"
         logger.info(
             "[TEMPLATE] scene=%s requested=%s resolved=%s source=registered_chemistry",
             scene_id,
@@ -63,7 +79,7 @@ def _resolve_template(plan: dict[str, Any]) -> tuple[type, str, str]:
         )
         return template_cls, template_id, "registered_chemistry"
 
-    if template_id in _GENERIC_TEMPLATE_IDS or template_cls is None:
+    if chemistry_allowed and (template_id in _GENERIC_TEMPLATE_IDS or template_cls is None):
         try:
             from modules.planning.chemistry_router import route_chemistry_template
             chem_id = route_chemistry_template(
@@ -113,14 +129,15 @@ def semantic_compile(
     plan: dict[str, Any],
     sync_result: dict[str, Any],
     workspace: RenderWorkspace | None = None,
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str]:
     """Compile a Manim scene file from a semantic plan + timed timeline.
 
-    Returns (file_path, scene_code) — the file is written to disk.
+    Returns (file_path, scene_code, scene_class_name) — the file is written to disk.
     """
     scene_id = plan["scene_id"]
     template_id = plan.get("concept_template", "intro")
     logger.info("Compiling scene %d with template '%s'", scene_id, template_id)
+    scene_class_name = _scene_class_name(scene_id)
 
     template_cls, resolved_id, source = _resolve_template(plan)
     if resolved_id in ("freeform", "intro") and source == "fallback_intro":
@@ -138,7 +155,7 @@ def semantic_compile(
         timeline["audio_duration"] = sync_result.get("audio_duration", 8.0)
 
     code = template_cls.compile(plan, timeline)
-    code = _post_process(code, scene_id)
+    code = _post_process(code, scene_id, scene_class_name)
 
     out_path = _manim_output_dir(workspace) / f"scene_{scene_id}.py"
     out_path.write_text(code, encoding="utf-8")
@@ -148,7 +165,7 @@ def semantic_compile(
         code.count("\n"),
         resolved_id,
     )
-    return out_path, code
+    return out_path, code, scene_class_name
 
 
 def semantic_compile_all(
@@ -156,7 +173,7 @@ def semantic_compile_all(
     timelines: list[dict[str, Any]],
     workspace: RenderWorkspace | None = None,
     force_regenerate: bool = True,
-) -> list[tuple[Path, str]]:
+) -> list[tuple[Path, str, str]]:
     """Compile all scenes, isolating failures so one bad scene can't kill the video."""
     if force_regenerate:
         logger.info(
@@ -165,7 +182,7 @@ def semantic_compile_all(
         )
 
     timeline_map = {t["scene_id"]: t for t in timelines}
-    results: list[tuple[Path, str]] = []
+    results: list[tuple[Path, str, str]] = []
     failed_scenes: list[int] = []
 
     for plan in plans:
@@ -188,7 +205,7 @@ def semantic_compile_all(
                 stub_path.write_text(stub_code, encoding="utf-8")
             except Exception as write_exc:
                 logger.error("Could not write stub for scene %d: %s", sid, write_exc)
-            results.append((stub_path, stub_code))
+            results.append((stub_path, stub_code, _scene_class_name(sid)))
 
     if failed_scenes:
         logger.warning(
@@ -203,6 +220,7 @@ def _compile_stub_fallback(plan: dict[str, Any], sync_result: dict[str, Any]) ->
     """Minimal valid Manim scene used when a template raises during compile."""
     title = plan.get("title", f"Scene {plan.get('scene_id', '?')}")
     goal = plan.get("learning_goal", "")
+    scene_class_name = _scene_class_name(plan.get("scene_id", 0))
     audio_dur = float(
         sync_result.get("audio_duration")
         or sync_result.get("timeline", {}).get("audio_duration")
@@ -215,7 +233,7 @@ def _compile_stub_fallback(plan: dict[str, Any], sync_result: dict[str, Any]) ->
 import numpy as np
 
 
-class GeneratedScene(Scene):
+class {scene_class_name}(Scene):
     def construct(self):
         self.camera.background_color = "#0f1117"
         title = Text({title_safe!r}, font_size=40, weight=BOLD, color="#e0e6f0")
@@ -234,7 +252,15 @@ class GeneratedScene(Scene):
 # ---------------------------------------------------------------------------
 
 
-def _post_process(code: str, scene_id: int) -> str:
+def _scene_class_name(scene_id: int) -> str:
+    return f"GeneratedScene{int(scene_id)}"
+
+
+def _rename_scene_class(code: str, scene_class_name: str) -> str:
+    return re.sub(r"class\s+GeneratedScene\b", f"class {scene_class_name}", code, count=1)
+
+
+def _post_process(code: str, scene_id: int, scene_class_name: str) -> str:
     """Ensure the generated code is well-formed and warn on any issues."""
     if "from manim import *" not in code:
         code = "from manim import *\nimport numpy as np\n\n" + code
@@ -242,8 +268,9 @@ def _post_process(code: str, scene_id: int) -> str:
     if "import numpy as np" not in code:
         code = code.replace("from manim import *", "from manim import *\nimport numpy as np", 1)
 
-    if "class GeneratedScene" not in code:
-        logger.error("Scene %d: compiled code missing GeneratedScene class!", scene_id)
+    code = _rename_scene_class(code, scene_class_name)
+    if f"class {scene_class_name}" not in code:
+        logger.error("Scene %d: compiled code missing %s class!", scene_id, scene_class_name)
 
     _warn_primitives(code, scene_id)
     code = _sanitize_manim_antipatterns(code, scene_id)

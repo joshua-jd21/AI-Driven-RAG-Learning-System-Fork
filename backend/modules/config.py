@@ -43,7 +43,10 @@ MANIM_REPAIR_MAX_CALLS = int(os.getenv("MANIM_REPAIR_MAX_CALLS", "1"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 NVIDIA_PLANNER_MODEL = os.getenv("NVIDIA_PLANNER_MODEL", "meta/llama-3.3-70b-instruct")
-NVIDIA_REPAIR_MODEL = os.getenv("NVIDIA_REPAIR_MODEL", "deepseek-ai/deepseek-r1")
+# Reuse the verified planner model unless a separate repair model is explicitly configured.
+NVIDIA_REPAIR_MODEL = os.getenv("NVIDIA_REPAIR_MODEL") or NVIDIA_PLANNER_MODEL
+NVIDIA_NARRATION_MAX_TOKENS = int(os.getenv("NVIDIA_NARRATION_MAX_TOKENS", "2048"))
+NVIDIA_SEMANTIC_PLAN_MAX_TOKENS = int(os.getenv("NVIDIA_SEMANTIC_PLAN_MAX_TOKENS", "8192"))
 
 MANIM_QUALITY = os.getenv("MANIM_QUALITY", "-qm")
 MANIM_MAX_RETRIES = int(os.getenv("MANIM_MAX_RETRIES", "3"))

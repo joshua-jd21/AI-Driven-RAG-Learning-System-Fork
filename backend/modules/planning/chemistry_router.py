@@ -190,6 +190,7 @@ def route_chemistry_template(
     tags_lower = [t.lower() for t in semantic_tags]
     vis_lower = [v.lower() for v in visualizable_elements]
     combined = topic_lower + " " + " ".join(tags_lower) + " " + " ".join(vis_lower)
+    combined_no_tags = topic_lower + " " + " ".join(vis_lower)
 
     def _kw_hit(keyword_set: frozenset, text: str) -> bool:
         """Simple substring check (fast path used before full word-boundary match)."""
@@ -211,6 +212,11 @@ def route_chemistry_template(
                 # Refine: electron config specifics → electron_configuration
                 if _kw_hit(_ELECTRON_CONFIG_KEYWORDS_FINE, combined):
                     return "electron_configuration"
+                # The generic atomic-structure tag is too broad to trust on its own.
+                # Require topic / visualizable evidence before upgrading a generic
+                # template, so unrelated physics sections don't get routed here.
+                if not _kw_hit(_ATOMIC_KEYWORDS, combined_no_tags):
+                    continue
             return base
 
     # 2. Visualizable elements — route to the most specific atomic template
@@ -257,7 +263,7 @@ def route_chemistry_template(
         return "electron_configuration"
 
     # 5. General atomic structure keyword match
-    if _kw_match(_ATOMIC_KEYWORDS, combined):
+    if _kw_match(_ATOMIC_KEYWORDS, combined_no_tags):
         prefs = _ROLE_PREFERENCE.get(scene_role, [])
         for p in prefs:
             if p in ("bohr_orbit", "atomic_structure", "rutherford_gold_foil"):

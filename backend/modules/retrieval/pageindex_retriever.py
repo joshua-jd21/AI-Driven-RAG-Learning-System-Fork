@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,8 +17,8 @@ from PageIndex.pageindex.results_loader import DocumentArtifacts
 _PAGEINDEX_ROOT = _TOPIC2MANIM_ROOT / "PageIndex"
 _RESULTS_ROOT = _PAGEINDEX_ROOT / "results"
 
-_TOP_K = 3
-_CONTENT_CHAR_CAP = 3000
+_TOP_K = 5
+_CONTENT_CHAR_CAP = 5000
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,38 @@ class DocumentResolution:
 def _normalize(name: str) -> str:
     base = name.lower().removesuffix(".pdf")
     return re.sub(r"[^a-z0-9]+", "", base)
+
+
+def _normalize_text(text: str) -> str:
+    """Normalize text for topic matching.
+
+    Curly apostrophes and mixed Unicode punctuation in textbook titles can
+    otherwise prevent exact topic matches such as "Ohm's Law".
+    """
+    text = unicodedata.normalize("NFKC", text)
+    text = text.replace("’", "'").replace("“", '"').replace("”", '"')
+    return text.casefold()
+
+
+def _tokenize(text: str) -> List[str]:
+    """Return alphanumeric tokens with light stopword filtering."""
+    tokens = [
+        token
+        for token in re.findall(r"[a-z0-9]+", _normalize_text(text))
+        if len(token) > 2
+    ]
+    return tokens
+
+
+def _topic_terms(topic: str) -> List[str]:
+    """Extract meaningful query terms from a topic string."""
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for token in _tokenize(topic):
+        if token not in seen:
+            seen.add(token)
+            ordered.append(token)
+    return ordered
 
 
 def _basename_from_document_id(document_id: str) -> str:
@@ -551,37 +584,51 @@ def _resolve_prerequisites(node_id: str, graph: dict, all_nodes: list) -> List[d
     return prereqs
 
 
-def _score_node(node: dict, topic_words: set, document_subject: str = "General") -> float:
-    title = (node.get("title") or "").lower()
-    summary = (node.get("summary") or "").lower()
-    keywords = " ".join(node.get("keywords") or []).lower()
-    tags_list = [t.lower() for t in (node.get("semantic_tags") or [])]
+def _score_node(
+    node: dict,
+    topic_terms: List[str],
+    topic_phrase: str,
+    document_subject: str = "General",
+) -> float:
+    title = _normalize_text(node.get("title") or "")
+    summary = _normalize_text(node.get("summary") or "")
+    keywords = _normalize_text(" ".join(node.get("keywords") or []))
+    tags_list = [_normalize_text(t) for t in (node.get("semantic_tags") or [])]
     tags_str = " ".join(tags_list)
-    vis_elements = [v.lower() for v in (node.get("visualizable_elements") or [])]
+    vis_elements = [_normalize_text(v) for v in (node.get("visualizable_elements") or [])]
 
-    combined = f"{title} {summary} {keywords} {tags_str}"
+    combined = " ".join([title, summary, keywords, tags_str, " ".join(vis_elements)])
+    score = 0.0
 
-    def _wb_hit(word: str, text: str) -> bool:
-        return bool(re.search(r"\b" + re.escape(word) + r"\b", text))
+    if topic_phrase and topic_phrase in combined:
+        score += 4.0
+    if topic_phrase and topic_phrase in title:
+        score += 2.5
 
-    hits = sum(1.0 for w in topic_words if _wb_hit(w, combined))
+    for term in topic_terms:
+        if term in title:
+            score += 2.1
+        if term in keywords:
+            score += 1.5
+        if term in summary:
+            score += 1.2
+        if term in tags_str:
+            score += 0.9
+        if any(term in ve for ve in vis_elements):
+            score += 0.8
+        if term in combined:
+            score += 0.35
 
-    tag_boost = 0.0
     if document_subject == "Chemistry":
-        tag_boost = 2.0 if (
-            any(t in _CHEMISTRY_BOOST_TAGS for t in tags_list)
-            and bool(topic_words & _CHEMISTRY_TOPIC_TERMS)
-        ) else 0.0
+        if any(t in _CHEMISTRY_BOOST_TAGS for t in tags_list) and any(
+            term in _CHEMISTRY_TOPIC_TERMS for term in topic_terms
+        ):
+            score += 2.0
 
-    vis_boost = sum(
-        0.5 for ve in vis_elements
-        if any(_wb_hit(w, ve) for w in topic_words)
-    )
-
-    depth_bonus = 0.1 * (node.get("level", 1) - 1)
-    summary_bonus = 0.2 if len((node.get("summary") or "")) > 30 else 0.0
-
-    return hits + tag_boost + vis_boost + depth_bonus + summary_bonus
+    score += 0.1 * max(0, int(node.get("level", 1)) - 1)
+    if len(node.get("summary") or "") > 30:
+        score += 0.2
+    return score
 
 
 def _breadcrumb(node: dict, all_nodes: list) -> str:
@@ -662,15 +709,67 @@ def _build_sections(
         )
         return []
 
-    topic_words = set(w for w in topic.lower().split() if len(w) > 2)
+    topic_phrase = _normalize_text(topic)
+    topic_terms = _topic_terms(topic)
     doc_subject = _folder_subject(folder)
     scored = [
-        (node, _score_node(node, topic_words, document_subject=doc_subject))
+        (node, _score_node(node, topic_terms, topic_phrase, document_subject=doc_subject))
         for node in all_nodes
         if node.get("content_type") != "preface"
     ]
     scored.sort(key=lambda x: x[1], reverse=True)
-    top_matches = [(n, s) for n, s in scored[:_TOP_K] if s > 0]
+    # Second pass: score actual page text for the best metadata candidates.
+    rescored: list[tuple[dict, float]] = []
+    page_term_hits: dict[str, int] = {}
+    for node, score in scored[: max(_TOP_K * 4, 12)]:
+        start = node.get("start_page") or node.get("start_index")
+        end = node.get("end_page") or node.get("end_index")
+        page_text = ""
+        if start and end:
+            pages = artifacts.get_pages(int(start), int(end))
+            matched_pages: list[str] = []
+            matched_terms = 0
+            for page in pages:
+                raw_text = page.get("text") or ""
+                content = _normalize_text(raw_text)
+                if not content:
+                    continue
+                page_terms = [term for term in topic_terms if term in content]
+                if page_terms:
+                    matched_pages.append(raw_text)
+                    matched_terms = max(matched_terms, len(page_terms))
+            page_term_hits[str(node.get("node_id", start))] = matched_terms
+            if matched_pages:
+                page_text = "\n\n".join(matched_pages)
+                score += 2.0 * matched_terms
+                score += 1.25 * (matched_terms / max(len(topic_terms), 1))
+                if topic_phrase and topic_phrase in _normalize_text(page_text):
+                    score += 2.5
+            else:
+                page_text = artifacts.get_page_text(
+                    int(start),
+                    int(end),
+                    max_chars=max(1200, _CONTENT_CHAR_CAP // 2),
+                    skip_garbled=True,
+                )
+        rescored.append((node, score))
+    rescored.sort(key=lambda x: x[1], reverse=True)
+
+    top_score = rescored[0][1] if rescored else 0.0
+    min_score = max(1.35, top_score * 0.25)
+    top_matches = [(n, s) for n, s in rescored if s >= min_score]
+    if len(top_matches) < min(_TOP_K, 3):
+        strong_term_hits = [
+            (n, s)
+            for n, s in rescored
+            if page_term_hits.get(str(n.get("node_id", n.get("start_page") or n.get("start_index"))), 0) >= min(2, max(1, len(topic_terms)))
+        ]
+        for candidate in strong_term_hits:
+            if candidate not in top_matches:
+                top_matches.append(candidate)
+    if not top_matches:
+        top_matches = [(n, s) for n, s in rescored[:_TOP_K] if s > 0]
+    top_matches = top_matches[:_TOP_K]
     if not top_matches:
         logger.info(
             "No matching nodes topic=%r document=%s source=%s",
@@ -679,6 +778,15 @@ def _build_sections(
             source,
         )
         return []
+
+    # Keep provenance and page order, but avoid noisy score order in the
+    # downstream LLM prompt.
+    top_matches.sort(
+        key=lambda item: (
+            int(item[0].get("start_page") or item[0].get("start_index") or 0),
+            -item[1],
+        )
+    )
 
     sections: List[Dict[str, Any]] = []
     for node, score in top_matches:
@@ -689,9 +797,18 @@ def _build_sections(
         if start and end:
             pages = artifacts.get_pages(int(start), int(end))
             page_numbers = [int(p["page"]) for p in pages if p.get("page")]
-            page_text = artifacts.get_page_text(
-                int(start), int(end), max_chars=_CONTENT_CHAR_CAP, skip_garbled=True
-            )
+            matched_pages: list[str] = []
+            for page in pages:
+                raw_text = page.get("text") or ""
+                content = _normalize_text(raw_text)
+                if content and any(term in content for term in topic_terms):
+                    matched_pages.append(raw_text)
+            if matched_pages:
+                page_text = "\n\n".join(matched_pages)
+            else:
+                page_text = artifacts.get_page_text(
+                    int(start), int(end), max_chars=_CONTENT_CHAR_CAP, skip_garbled=True
+                )
 
         node_id = node.get("node_id", "")
         sections.append({

@@ -4,6 +4,7 @@ import os
 import json
 from pathlib import Path
 from pageindex import *
+from pageindex.page_index import page_index_main
 from pageindex.page_index_md import md_to_tree
 from pageindex.utils import ConfigLoader, get_pdf_name, print_tree
 

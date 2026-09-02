@@ -3,6 +3,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from modules.manim.templates.segment_timing import (
+    segment_at,
+    segment_duration,
+    segment_end,
+    segment_hold,
+    segment_rt,
+    segment_start as segment_window_start,
+    segments_from_timeline,
+)
+
 _HEADER = """\
 from manim import *
 import numpy as np
@@ -59,6 +69,10 @@ def get_event(
     return None
 
 
+def narration_segments(timeline: dict[str, Any]) -> list[dict[str, Any]]:
+    return segments_from_timeline(timeline)
+
+
 def get_event_by_type(
     timeline: dict[str, Any],
     plan_events: list[dict[str, Any]],
@@ -92,12 +106,14 @@ def event_rt(
     """
 
     ev = get_event(timeline, event_id)
-
     if ev is None:
         return default
 
-    rt = float(ev.get("run_time", default))
+    seg = _segment_for_event(timeline, event_id)
+    if seg is not None:
+        return segment_rt(seg, default=default, floor=0.35, cap=default)
 
+    rt = float(ev.get("run_time", default))
     return rt if rt >= 0.1 else default
 
 
@@ -122,8 +138,11 @@ def event_rt_type(
     if ev is None:
         return default
 
-    rt = float(ev.get("run_time", default))
+    seg = _segment_for_plan_event(timeline, plan_events, event_type, fallback_id)
+    if seg is not None:
+        return segment_rt(seg, default=default, floor=0.35, cap=default)
 
+    rt = float(ev.get("run_time", default))
     return rt if rt >= 0.1 else default
 
 
@@ -137,9 +156,12 @@ def event_hold(
     """
 
     ev = get_event(timeline, event_id)
-
     if ev is None:
         return default
+
+    seg = _segment_for_event(timeline, event_id)
+    if seg is not None:
+        return segment_hold(seg, event_rt(timeline, event_id, default), minimum=default)
 
     return float(ev.get("hold_after", default))
 
@@ -163,8 +185,11 @@ def event_hold_type(
     if ev is None:
         return default
 
-    hold = float(ev.get("hold_after", 0.0))
+    seg = _segment_for_plan_event(timeline, plan_events, event_type)
+    if seg is not None:
+        return segment_hold(seg, event_rt_type(timeline, plan_events, event_type, default=default), minimum=default)
 
+    hold = float(ev.get("hold_after", 0.0))
     return hold if hold >= 0.3 else default
 
 
@@ -178,9 +203,12 @@ def event_start(
     """
 
     ev = get_event(timeline, event_id)
-
     if ev is None:
         return default
+
+    seg = _segment_for_event(timeline, event_id)
+    if seg is not None:
+        return segment_window_start(seg, default=default)
 
     return float(ev.get("start", default))
 
@@ -215,6 +243,46 @@ def build_sequential(
         )
 
     return "".join(lines)
+
+
+def _segment_for_event(
+    timeline: dict[str, Any],
+    event_id: str,
+) -> dict[str, Any] | None:
+    events = list(timeline.get("events", []))
+    segments = narration_segments(timeline)
+    if not events or not segments:
+        return None
+
+    for idx, ev in enumerate(events):
+        if ev.get("id") == event_id:
+            if idx < len(segments):
+                return segments[idx]
+            return segments[-1]
+    return None
+
+
+def _segment_for_plan_event(
+    timeline: dict[str, Any],
+    plan_events: list[dict[str, Any]],
+    event_type: str,
+    fallback_id: str | None = None,
+) -> dict[str, Any] | None:
+    segments = narration_segments(timeline)
+    if not segments:
+        return None
+
+    if plan_events:
+        for idx, plan_ev in enumerate(plan_events):
+            if plan_ev.get("type") != event_type:
+                continue
+            if idx < len(segments):
+                return segments[idx]
+            return segments[-1]
+
+    if fallback_id is not None:
+        return _segment_for_event(timeline, fallback_id)
+    return None
 
 
 def indent(
@@ -264,6 +332,34 @@ def asset_param(
                 default,
             )
 
+    return default
+
+
+def narration_segments(timeline: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the higher-level narration segments when available."""
+    segments = timeline.get("segments", [])
+    return list(segments) if isinstance(segments, list) else []
+
+
+def segment_start(
+    timeline: dict[str, Any],
+    index: int,
+    default: float = 0.0,
+) -> float:
+    segments = narration_segments(timeline)
+    if index < len(segments):
+        return float(segments[index].get("start", default))
+    return default
+
+
+def segment_end(
+    timeline: dict[str, Any],
+    index: int,
+    default: float = 0.0,
+) -> float:
+    segments = narration_segments(timeline)
+    if index < len(segments):
+        return float(segments[index].get("end", default))
     return default
 
 

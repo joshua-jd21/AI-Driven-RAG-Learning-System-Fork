@@ -2,6 +2,13 @@
 from manim import *
 import numpy as np
 from ..style_config import *
+from .segment_timing import (
+    segment_actions,
+    segment_at,
+    segment_duration,
+    segment_rt,
+    segments_from_timeline,
+)
 
 _DEFAULT_COLORS = [CHALK_BLUE, CHALK_GREEN, CHALK_YELLOW, CHALK_PINK]
 
@@ -57,7 +64,13 @@ class ConceptCardScene(Scene):
         fit_in_box(VGroup(card_title, card_text), inner_w, height - 0.9)
         return VGroup(card_bg, card_title, card_text)
 
-    def build_scene(self, main_title: str, cards: list, audio_duration: float = 0.0):
+    def build_scene(
+        self,
+        main_title: str,
+        cards: list,
+        audio_duration: float = 0.0,
+        timeline: dict | None = None,
+    ):
         self.setup_background()
         if not cards:
             cards = [
@@ -76,7 +89,10 @@ class ConceptCardScene(Scene):
         title = chalk_title(str(main_title)[:80])
         fit_title(title, SAFE_W - 0.6)
         title.move_to(np.array([0, TITLE_BAND_Y, 0]))
-        self.play(DrawBorderThenFill(outer_box), Write(title), run_time=1.0, rate_func=smooth)
+        segments = segments_from_timeline(timeline)
+        title_seg = segment_at(timeline, 0)
+        title_rt = segment_rt(title_seg, default=1.0, floor=0.45, cap=1.0) if segments else 1.0
+        self.play(DrawBorderThenFill(outer_box), Write(title), run_time=title_rt, rate_func=smooth)
 
         normalized = []
         for i, c in enumerate(cards[:4]):
@@ -116,20 +132,46 @@ class ConceptCardScene(Scene):
             for i in range(len(card_group) - 1)
         ])
 
-        self.play(
-            LaggedStart(
-                *[FadeIn(card, shift=UP * 0.2) for card in card_group],
-                lag_ratio=0.15,
-            ),
-            run_time=min(2.0, 0.5 + 0.4 * n),
-            rate_func=smooth,
-        )
-        if len(arrows) > 0:
+        cursor = title_rt
+        if segments:
+            for i, card in enumerate(card_group):
+                seg = segment_at(timeline, min(i + 1, len(segments) - 1)) or title_seg
+                if seg is None:
+                    seg = title_seg
+                if seg is not None:
+                    start = float(seg.get("start", cursor))
+                    if start > cursor:
+                        self.wait(start - cursor)
+                        cursor = start
+                rt = segment_rt(seg, default=min(1.0, 0.55 + 0.15 * i), floor=0.35, cap=1.1)
+                self.play(FadeIn(card, shift=UP * 0.2), run_time=rt, rate_func=smooth)
+                cursor += rt
+                hold = max(0.0, segment_duration(seg) - rt)
+                if hold > 0.05:
+                    self.wait(hold)
+                    cursor += hold
+                if seg and any(a.lower() in {"highlight", "compare", "compare_and_contrast"} for a in segment_actions(seg)):
+                    self.play(Indicate(card), run_time=min(0.5, max(0.3, rt * 0.5)))
+                    cursor += min(0.5, max(0.3, rt * 0.5))
+        else:
             self.play(
-                LaggedStart(*[GrowArrow(a) for a in arrows], lag_ratio=0.2),
-                run_time=0.6,
+                LaggedStart(
+                    *[FadeIn(card, shift=UP * 0.2) for card in card_group],
+                    lag_ratio=0.15,
+                ),
+                run_time=min(2.0, 0.5 + 0.4 * n),
                 rate_func=smooth,
             )
+            cursor += min(2.0, 0.5 + 0.4 * n)
 
-        tail = max(0.5, audio_duration - 3.5) if audio_duration > 0 else 1.5
+        if len(arrows) > 0:
+            arrow_rt = segment_rt(segment_at(timeline, min(len(card_group), max(0, len(segments) - 1))) if segments else None, default=0.6, floor=0.35, cap=0.8)
+            self.play(
+                LaggedStart(*[GrowArrow(a) for a in arrows], lag_ratio=0.2),
+                run_time=arrow_rt,
+                rate_func=smooth,
+            )
+            cursor += arrow_rt
+
+        tail = max(0.5, audio_duration - cursor - 0.4) if audio_duration > 0 else 1.5
         self.wait(tail)
